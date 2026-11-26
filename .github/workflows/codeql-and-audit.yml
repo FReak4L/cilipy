@@ -1,0 +1,54 @@
+name: CodeQL & Dependency Audit Bot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "30 2 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    name: CodeQL SAST (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python", "javascript-typescript"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@v3
+
+  rust-audit:
+    name: RustSec Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cargo-audit on bot/Cargo.lock
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          lockfile: bot/Cargo.lock
+
+  npm-audit:
+    name: NPM High/Critical Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Audit skills-catalog, web, and ai-memory lockfiles
+        run: |
+          npm --prefix mcp/skills-catalog audit --package-lock-only --audit-level=high
+          npm --prefix mcp/skills-catalog/web audit --package-lock-only --audit-level=high
+          npm --prefix mcp/ai-memory audit --package-lock-only --audit-level=high

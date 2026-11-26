@@ -15,6 +15,14 @@ updates:
     directory: "/mcp/skills-catalog"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/mcp/skills-catalog/web"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/mcp/ai-memory"
+    schedule:
+      interval: "weekly"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
