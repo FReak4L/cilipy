@@ -149,7 +149,12 @@ class TestEndToEndPipeline(unittest.IsolatedAsyncioTestCase):
           - SimHash/Jaccard deduplication eliminates near-duplicate mirrors
           - SQLite cache hits on repeat execution
         """
-        source_path = Path("/root/ntest/pack/source.txt")
+        local_source = Path("/root/ntest/pack/source.txt")
+        bundled_source = Path(__file__).resolve().parent / "sample_queries.txt"
+        try:
+            source_path = local_source if local_source.is_file() else bundled_source
+        except PermissionError:
+            source_path = bundled_source
         self.assertTrue(source_path.is_file(), f"Missing fixture: {source_path}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -436,7 +441,7 @@ class TestEndToEndPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diff, 42)
         self.assertEqual(q, "site:docs.python.org asyncio")
 
-        bench_path = Path("/root/ntest/v3/benchmark_100_queries.txt")
+        bench_path = Path(__file__).resolve().parent.parent / "benchmark_100_queries.txt"
         self.assertTrue(bench_path.is_file())
         parsed_rows = []
         async for line in stream_queries_from_file(bench_path):
