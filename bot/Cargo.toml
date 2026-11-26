@@ -45,7 +45,7 @@ futures-util = "0.3"
 shell-words = "1.1"
 tempfile = "3.19"
 unicode-width = "0.2"
-html-escape = "0.2"
+html-escape = "0.3"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 similar = "2"
 ignore = "0.4"
