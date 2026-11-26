@@ -1,0 +1,18 @@
+title = "cilipy gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist build artifacts, verified test fixtures, and emoji-pack slug metadata"
+paths = [
+  '''(^|/)target/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)skills/telegram-premium-emoji/data/emoji-packs\.json$''',
+  '''(^|/)skills/session-handoff/scripts/redaction_linter\.py$''',
+  '''(^|/)mcp/search-v3/tests/test_google_standalone\.py$''',
+  '''(^|/)bot/crates/agy-core/src/security\.rs$''',
+  '''(^|/)bot/crates/agy-ext/src/mcp_client\.rs$''',
+  '''(^|/)bot/crates/agy-ext/src/memory\.rs$''',
+]
