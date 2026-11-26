@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.5.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.4.1...cilipy-v4.5.0) (2026-11-26)
+
+
+### Features
+
+* automate Gemini account onboarding, secret-safe deletion, live probing & proxy binding ([a10dc61](https://github.com/FReak4L/cilipy/commit/a10dc61019522f247fe339cb8910cd0db59c68c5))
+* automate Gemini account onboarding, secret-safe deletion, live probing & proxy binding ([aad6179](https://github.com/FReak4L/cilipy/commit/aad6179b5311c639a7ba280add959c0c155a365c))
+
 ## [4.4.1](https://github.com/FReak4L/cilipy/compare/cilipy-v4.4.0...cilipy-v4.4.1) (2026-11-26)
 
 
