@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.4.1](https://github.com/FReak4L/cilipy/compare/cilipy-v4.4.0...cilipy-v4.4.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* unify Premium button icons and emoji palette in Web Model & Gemini Manager ([64d5bb2](https://github.com/FReak4L/cilipy/commit/64d5bb2f383c60ad53fad453e4a1edbe7c9489d3))
+* unify Premium button icons and emoji palette in Web Model & Gemini Manager ([0c74ddf](https://github.com/FReak4L/cilipy/commit/0c74ddfa772ea8ab131e2044d5ce3a0a7a3dacd6))
+
 ## [4.4.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.3.0...cilipy-v4.4.0) (2026-11-26)
 
 
