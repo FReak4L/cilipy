@@ -59,6 +59,6 @@
     "p-limit": "^6.2.0",
     "picomatch": "^4.0.4",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   }
 }
