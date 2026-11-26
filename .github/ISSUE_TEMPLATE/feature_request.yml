@@ -1,0 +1,19 @@
+name: Feature Request
+description: Propose a new tool, skill, MCP section, or CI/CD improvement
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use Case
+      description: What workflow or capability should this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Design
+      description: Describe the module, CLI flags, MCP tools, or security constraints.
+    validations:
+      required: true

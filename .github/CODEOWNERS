@@ -1,0 +1,6 @@
+# Default owner for all reviews and security-critical files
+* @FReak4L
+/.github/ @FReak4L
+/deploy/ @FReak4L
+/scripts/ @FReak4L
+/SECURITY.md @FReak4L

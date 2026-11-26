@@ -1,0 +1,33 @@
+name: Bug Report
+description: Report a bug in agy-telegram, MCP Gateway, Search v3, SkillHub, or deployment scripts
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you for reporting an issue. Never paste real tokens, `.env` contents, or private server IPs.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Rust Bot / MCP Gateway (bot/)
+        - Search v3 MCP (mcp/search-v3/)
+        - Skills Catalog MCP (mcp/skills-catalog/)
+        - AI Memory Wrapper (mcp/ai-memory/)
+        - Rules / Skills (rules/, skills/)
+        - Updater / Sync / CI (scripts/, .github/)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce / logs (redacted)
+      render: shell
