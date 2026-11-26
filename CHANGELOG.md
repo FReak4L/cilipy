@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.2.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.1.1...cilipy-v4.2.0) (2026-11-26)
+
+
+### Features
+
+* fix turn routing, KV-cache compaction hysteresis, search-v3 recall/bandit persistence, and emergency rules ([8a9060f](https://github.com/FReak4L/cilipy/commit/8a9060f621cd4d82d8eae4f711fb2d818105edf4))
+* fix turn routing, KV-cache compaction hysteresis, search-v3 recall/bandit persistence, and emergency rules ([6b9c0b6](https://github.com/FReak4L/cilipy/commit/6b9c0b64c5290ac60fae27967acd448a3b480e65))
+
 ## [4.1.1](https://github.com/FReak4L/cilipy/compare/cilipy-v4.1.0...cilipy-v4.1.1) (2026-11-26)
 
 
