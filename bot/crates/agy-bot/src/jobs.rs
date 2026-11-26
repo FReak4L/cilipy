@@ -1914,8 +1914,21 @@ impl JobManager {
                 "grok_bot"
             }
             Some("agy") => "agy",
+            Some("gemini_web") => {
+                if !allow_uncensored {
+                    let lang = crate::i18n::lang_for(&self.acl, &self.store, req.uid);
+                    let txt = format!(
+                        "⛔ {}",
+                        crate::i18n::perm_label(lang, "uncensored")
+                    );
+                    let _ = self.render.send_html_simple(req.chat_id, &txt, None).await;
+                    return Ok(());
+                }
+                "gemini_web"
+            }
             _ => match user_state.extra.get("engine").and_then(|v| v.as_str()) {
                 Some("uncensored") if allow_uncensored => "uncensored",
+                Some("gemini_web") if allow_uncensored => "gemini_web",
                 Some("grok_bot") if allow_grok => "grok_bot",
                 Some("grok") if allow_grok => "grok",
                 _ if allow_uncensored
@@ -1939,6 +1952,7 @@ impl JobManager {
         };
         let engine_label = match backend {
             "uncensored" => "Venice Uncensored",
+            "gemini_web" => "Gemini Manager",
             "grok" => "Grok OAuth",
             "grok_bot" => "Grok Bot",
             _ => "Antigravity",
@@ -2174,6 +2188,53 @@ impl JobManager {
                     max_steps_override,
                     custom_sys.as_deref(),
                     three_stage_mode,
+                    Some(progress_cb),
+                    cancel_rx.clone(),
+                )
+                .await
+            } else if backend == "gemini_web" {
+                used_account = Some("gemini-manager".to_string());
+                let mode = crate::handlers_gemini::gemini_chat_mode(&user_state);
+                let model_opt = crate::handlers_gemini::gemini_selected_model(&user_state);
+                let gem_id = crate::handlers_gemini::gemini_active_gem_id(&user_state);
+                extra_notes.push(format!(
+                    "💎 <i>Gemini Manager ({}) · <code>{}</code></i>",
+                    esc(mode.label()),
+                    esc(model_opt.as_deref().unwrap_or("auto"))
+                ));
+                let sess_key = (!req.overrides.isolated)
+                    .then(|| crate::handlers_gemini::gemini_session_key(req.uid));
+                let three_stage_mode = if is_lite_turn && req.overrides.force_agent_mode.is_none() {
+                    agy_ext::agent_runtime::ThreeStageMode::Off
+                } else {
+                    crate::handlers_gemini::gemini_three_stage_mode(&user_state)
+                };
+                let max_steps_override = if is_lite_turn { Some(4) } else { None };
+                let enriched_prompt = agy_ext::uncensored::enrich_prompt_with_attachments(
+                    &base_req.prompt,
+                    &req.attachments,
+                    mode == agy_ext::gemini_web::GeminiChatMode::Agent,
+                )
+                .await;
+
+                agy_ext::gemini_web::run_gemini_web_turn(
+                    agy_ext::gemini_web::GeminiTurnParams {
+                        prompt: &enriched_prompt,
+                        model_override: model_opt.as_deref(),
+                        mode,
+                        gem_id: gem_id.as_deref(),
+                        cwd,
+                        workspace_root: &self.cfg.agy_workspace,
+                        outbox_dir: &outdir,
+                        mcp_config_path: &self.cfg.mcp_config_path,
+                        skills_dir: &self.cfg.agy_skills_dir,
+                        state_dir: &self.cfg.state_dir,
+                        session_key: sess_key,
+                        allow_root,
+                        allow_sandbox,
+                        max_steps: max_steps_override,
+                        three_stage_mode,
+                    },
                     Some(progress_cb),
                     cancel_rx.clone(),
                 )

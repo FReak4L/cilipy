@@ -5337,11 +5337,15 @@ pub fn extract_tool_calls(msg: &Value, content_text: &str) -> Vec<(String, Strin
 
 /// Whether this engine talks to Venice Web / OmniRoute (`/api/inference/chat`) where OpenAI
 /// `tools` arrays are stripped upstream and empty assistant messages trigger HTTP 400.
-fn is_venice_prompt_engine(cfg: &AgentTurnConfig) -> bool {
+fn is_venice_engine(cfg: &AgentTurnConfig) -> bool {
     cfg.engine_id == "uncensored"
         || cfg.model.starts_with("veniceai/")
         || cfg.model.starts_with("venice-web/")
         || cfg.model.starts_with("ven/")
+}
+
+fn is_venice_prompt_engine(cfg: &AgentTurnConfig) -> bool {
+    is_venice_engine(cfg) || cfg.engine_id == "gemini_web"
 }
 
 /// Render a single parameter type concisely while PRESERVING `enum` values and nested array item keys
@@ -7523,7 +7527,7 @@ pub async fn run_openai_agent_turn(
     let mut hit_step_cap = false;
     let mut active_model = cfg.model.clone();
     let mut active_max_tokens = cfg.max_tokens;
-    let mut failover_queue: Vec<String> = if venice_mode {
+    let mut failover_queue: Vec<String> = if is_venice_engine(cfg) {
         crate::uncensored::fallback_failover_chain(&active_model)
     } else {
         Vec::new()

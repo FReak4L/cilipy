@@ -406,7 +406,7 @@ impl BotCtx {
                     engines.push(self.btn(
                         "fire",
                         t(lang, Tx::BtnUncensored),
-                        Some("umodels:0"),
+                        Some("webmodel:home"),
                         None,
                         None,
                     ));
@@ -940,10 +940,15 @@ impl BotCtx {
                     && u.model
                         .as_deref()
                         .is_some_and(agy_ext::uncensored::is_uncensored_model)));
+        let is_gemini_web = !is_uncensored
+            && self.has_perm(uid, "uncensored")
+            && engine_extra == Some("gemini_web");
         let is_grok_bot = !is_uncensored
+            && !is_gemini_web
             && self.has_perm(uid, "grok")
             && engine_extra == Some("grok_bot");
         let is_grok = !is_uncensored
+            && !is_gemini_web
             && !is_grok_bot
             && self.has_perm(uid, "grok")
             && (engine_extra == Some("grok")
@@ -959,6 +964,10 @@ impl BotCtx {
                 .filter(|s| agy_ext::uncensored::is_uncensored_model(s))
                 .unwrap_or(agy_ext::uncensored::DEFAULT_UNCENSORED_MODEL);
             format!("{m} (Venice)")
+        } else if is_gemini_web {
+            let m = crate::handlers_gemini::gemini_selected_model(&u)
+                .unwrap_or_else(|| "auto".to_string());
+            format!("{m} (Gemini)")
         } else if is_grok_bot {
             let bot_name = crate::handlers_grok_bot::selected_grok_bot(&u)
                 .map(|(_, name)| name)
@@ -982,6 +991,9 @@ impl BotCtx {
                 "Chat"
             };
             format!("\n<b>{}</b>  <code>Venice Uncensored ({kind})</code>", t(lang, Tx::DashFieldEngine))
+        } else if is_gemini_web {
+            let gmode = crate::handlers_gemini::gemini_chat_mode(&u);
+            format!("\n<b>{}</b>  <code>Gemini Manager ({})</code>", t(lang, Tx::DashFieldEngine), gmode.as_str())
         } else if is_grok_bot {
             let oauth_who = agy_ext::grok_bot::load_grok_bot_creds(&self.cfg.state_dir)
                 .map(|c| {
@@ -1647,7 +1659,7 @@ mod tests {
             .inline_keyboard
             .iter()
             .flatten()
-            .any(|b| b.callback_data.as_deref() == Some("umodels:0")));
+            .any(|b| b.callback_data.as_deref() == Some("webmodel:home")));
         assert!(!mk_custom
             .inline_keyboard
             .iter()
