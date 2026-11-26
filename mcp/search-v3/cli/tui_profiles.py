@@ -28,8 +28,8 @@ API_ENGINES: tuple[str, ...] = (
 
 HYBRID_ENGINES: tuple[str, ...] = (
     "searxng",
-    "yahoo_direct",
     "ddg_html",
+    "yahoo_direct",
     "ddg_lite",
     "ddgs",
     "google_web_udm14",

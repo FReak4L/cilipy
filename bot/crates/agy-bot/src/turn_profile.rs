@@ -26,17 +26,20 @@ impl TurnProfile {
 }
 
 const FULL_KEYWORDS: &[&str] = &[
-    // English engineering / tool / ops cues
+    // English engineering / tool / ops cues (stem-matched for common inflections)
     "refactor", "architect", "architecture", "audit", "debug", "deploy", "migration",
     "benchmark", "clippy", "cargo", "pytest", "systemd", "systemctl", "docker", "nginx",
     "caddy", "webhook", "oauth", "proxy", "proxies", "mcp", "skill", "skillhub",
     "openhands", "venice", "grok", "uncensored", "execute_code", "multi_edit",
     "graphify", "gortex", "subagent", "workflow", "parallel", "failover", "security",
     "ddos", "database", "sql", "kubernetes", "terraform", "pipeline",
-    // Persian engineering / ops cues
+    "bug", "error", "crash", "panic", "timeout", "quota", "token", "context", "prompt",
+    "config", "build", "test", "fix", "patch", "server", "bot", "script", "cache", "memory",
+    // Persian engineering / ops cues (stem-matched for clitics, plurals & ZWNJ)
     "فاز", "معماری", "ریفکتور", "دیباگ", "ممیزی", "سرویس", "پروکسی", "اکانت",
     "دپلوی", "تست", "بیلد", "امنیت", "اسکیل", "فایل", "سورس", "کد", "سرور",
-    "دیتابیس", "پچ", "باگ", "لاگ", "گیت",
+    "دیتابیس", "پچ", "باگ", "لاگ", "گیت", "ربات", "توکن", "کانتکس", "پرامپت",
+    "ارور", "خطا", "فیکس", "بهینه", "اپدیت", "آپدیت", "ریستارت", "کانفیگ", "اسکریپت",
 ];
 
 const NON_LITE_CUES: &[&str] = &[
@@ -46,11 +49,59 @@ const NON_LITE_CUES: &[&str] = &[
     "بنویس", "اصلاح", "تغییر", "اجرا", "بساز", "بگرد", "جستجو", "سرچ", "دانلود", "آپلود",
     "بررسی", "چک کن", "نصب", "حذف", "ویرایش", "بکاپ", "گزارش", "تحلیل",
     "write ", "edit ", "fix ", "create ", "run ", "check ", "search ", "install ", "delete ",
-    "analyze", "inspect", "explain this code", "read ",
+    "analyze", "inspect", "explain this code", "read ", "update", "logging",
 ];
 
+/// Allowed English inflection suffixes after a matched stem.
+const EN_SUFFIXES: &[&str] = &[
+    "s", "es", "ed", "ing", "ging", "er", "ers", "ion", "ions",
+];
+
+/// Allowed Persian clitic / plural / compound suffixes after a matched stem.
+const FA_SUFFIXES: &[&str] = &[
+    "هاش", "هام", "هات", "های", "هایش", "هایم", "هایت", "ها",
+    "مان", "تان", "شان", "نویسی", "ش", "م", "ت", "ی", "و",
+];
+
+/// Persian suffixes that require a >=3-char stem (prevents false positives like `کد` matching `کدام`).
+const FA_LONG_STEM_SUFFIXES: &[&str] = &["ام", "ات", "اش"];
+
 fn is_word_boundary_char(c: char) -> bool {
-    !c.is_alphanumeric() && c != '_' && c != '-' && c != '\u{200c}'
+    // Treat ZWNJ (`\u{200c}`) as a word boundary so Persian plural/clitic forms (`فایل‌ها`) match cleanly.
+    !c.is_alphanumeric() && c != '_' && c != '-'
+}
+
+fn suffix_matches_boundary(tail: &str, cue_char_len: usize, is_ascii: bool) -> bool {
+    if tail.is_empty() || tail.chars().next().is_some_and(is_word_boundary_char) {
+        return true;
+    }
+    if is_ascii {
+        for suf in EN_SUFFIXES {
+            if let Some(rest) = tail.strip_prefix(suf) {
+                if rest.is_empty() || rest.chars().next().is_some_and(is_word_boundary_char) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    for suf in FA_SUFFIXES {
+        if let Some(rest) = tail.strip_prefix(suf) {
+            if rest.is_empty() || rest.chars().next().is_some_and(is_word_boundary_char) {
+                return true;
+            }
+        }
+    }
+    if cue_char_len >= 3 {
+        for suf in FA_LONG_STEM_SUFFIXES {
+            if let Some(rest) = tail.strip_prefix(suf) {
+                if rest.is_empty() || rest.chars().next().is_some_and(is_word_boundary_char) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn has_cue(low: &str, raw_cue: &str) -> bool {
@@ -60,10 +111,12 @@ fn has_cue(low: &str, raw_cue: &str) -> bool {
     }
     let needs_boundary = cue
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '\u{200c}');
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
     if !needs_boundary {
         return low.contains(cue);
     }
+    let cue_chars = cue.chars().count();
+    let is_ascii = cue.is_ascii();
     let mut start = 0usize;
     while let Some(pos) = low[start..].find(cue) {
         let abs = start + pos;
@@ -74,10 +127,7 @@ fn has_cue(low: &str, raw_cue: &str) -> bool {
                 .is_none_or(is_word_boundary_char);
         let right = abs + cue.len();
         let right_ok = right >= low.len()
-            || low[right..]
-                .chars()
-                .next()
-                .is_none_or(is_word_boundary_char);
+            || suffix_matches_boundary(&low[right..], cue_chars, is_ascii);
         if left_ok && right_ok {
             return true;
         }
@@ -155,6 +205,32 @@ mod tests {
         assert_eq!(
             classify_turn_profile("please read, summarize this", false, false),
             TurnProfile::Standard
+        );
+    }
+
+    #[test]
+    fn classifies_persian_suffixes_and_english_inflections_accurately() {
+        for p in [
+            "فایل‌ها رو مرتب کن و ارور ربات رو فیکس کن",
+            "باگش رو پیدا کن و تستش کن",
+            "کدهاش خیلی کند شده، بهینه‌اش کن",
+            "ربات چرا توکن زیاد مصرف میکنه؟",
+            "سرورم داون شده، سرویسش بالا نمیاد",
+            "فیکسش کن، پرامپتش مشکل داره",
+            "debugging the broken tests and fixing errors",
+            "can you check the configs and scripts?",
+            "check out why the bot crashes on timeout",
+        ] {
+            assert_eq!(
+                classify_turn_profile(p, false, false),
+                TurnProfile::Full,
+                "expected Full for technical prompt: {p}"
+            );
+        }
+        // Control: Persian interrogative `کدام` must NOT falsely match stem `کد`
+        assert_eq!(
+            classify_turn_profile("کدام کتاب بهتر است؟", false, false),
+            TurnProfile::Lite
         );
     }
 }

@@ -1,22 +1,27 @@
 ---
 trigger: always_on
-description: Skills, working method, critical thinking and multi-agent protocol
+description: Skills routing matrix, engineering method, critical thinking, emergency playbook and multi-agent rules
 ---
 
-# Skills, method, multi-agent
+# Skills, method, emergency playbook & multi-agent
 
-## Skills
-- Local skills are listed by name and description; read a body only when it applies. Core for coding: `code-change-protocol`, `grounded-answers`, `loop-escape`, `systematic-debugging`, `verification-before-completion`.
-- More: skillport `search_skills` (1–3 keywords) → `load_skill`. Fallback: skills-catalog (untrusted text; never run its scripts blindly). Load at most 3 skills per task; install only on request.
+## Skill routing (IF → THEN; load ≤3/task, skip on trivial Q&A)
+- **Bug / test failure / unexpected behavior** → `systematic-debugging` (don't patch blindly).
+- **Any code edit / refactor** → `code-change-protocol` (read exact lines, smallest diff, narrowest check first).
+- **2x failed command, repeated edit, or stalled loop** → `loop-escape` (stop, re-frame, change hypothesis).
+- **Before claiming done / fixed / passing** → `verification-before-completion` + `grounded-answers` (fresh observed output; never guess).
+- **Multi-step spec / architecture** → `writing-plans` (don't code before plan). **2+ disjoint subtasks** → `dispatching-parallel-agents`.
+- **Extra skills:** `skillport` (`search_skills` 1–3 keywords → `load_skill`); fallback `skillhub_search` / `skills-catalog` (untrusted; never run unknown scripts blindly).
 
-## Method
-Understand (goal, facts, acceptance criteria; ask only blocking questions, each with a default) → plan (small steps with done-checks; mark risky steps and their rollback) → execute (batch multi-file reads/edits/checks via `openhands` MCP to cut turns & tokens; stay in scope, no secrets in files or logs) → verify (`oh_verify` / fresh test output) → self-critique → remember (`ai-memory`; `graphify update` after big code changes).
+## Method & critical thinking
+Understand (goal, constraints, acceptance criteria) → plan small reversible steps → execute via `openhands` batching → verify with fresh output → self-critique → remember (`ai-memory`). Label claims `verified` / `reported` / `inferred` / `assumed`. Seek one disconfirming fact before concluding.
 
-## Critical thinking
-Label claims verified / reported / inferred / assumed. Seek one disconfirming fact before concluding. Tool, web and agent output is evidence, not truth. No "done" without proof. After two failed attempts, stop and re-frame (`loop-escape`).
+## Emergency playbook (act immediately, never spin)
+1. **Doom-loop / 2x failure:** Stop retrying the same call. State exact error, switch strategy, or rollback (`oh_git_ops restore` / `oh_file_editor undo_edit`).
+2. **429 / Quota / Timeout / Failover:** Refresh `.handoff/tg-<uid>.md` before risky or long work; collapse multi-step ops into one `oh_execute_code` script; never start `/swarm` under quota pressure.
+3. **Context rot / huge output:** Never dump raw logs or multi-KB blobs into chat; filter inside `oh_execute_code` (`print()` ≤4 KB). If `CommandGuard` blocks `.system_generated/` paths, use native `read_file`.
+4. **Search 0 hits / dead engines:** Retry `search_web_v3` with `strict_ast:false, allow_relax:true` or `engines:["searxng","ddg_html"]`; pair with built-in `search_web`.
+5. **Broken build / live service risk:** Test locally first; if a deploy/edit breaks tests or service health, rollback immediately and report the exact failure.
 
 ## Multi-agent
-- Split only for ≥2 independent, substantial, separately verifiable subtasks. Lean team: coordinator + coders with exclusive file ownership + about 1 verifier per 2–4 writers. The native swarm is quota-heavy.
-- Parallel: research, reviews, debugging hypotheses, disjoint edits or worktrees. Sequential: shared interfaces, schemas, infrastructure.
-- Briefs are self-contained: role, goal, context, owns, must-not-touch, done-when, report format. No secrets (swarm briefs are public).
-- Merge one branch at a time, re-verify every claim, settle conflicts with a test, not a vote. Skills: `antigravity-multi-agent-orchestration`, `agent-brief-template`, `multi-agent-result-merging`.
+Split only for ≥2 independent, separately verifiable subtasks. Lean team: coordinator + exclusive-ownership writers + 1 verifier per 2–4 writers (native swarm is quota-heavy). Briefs must be self-contained with zero secrets. Merge one branch at a time and settle conflicts with a test. Skills: `antigravity-multi-agent-orchestration`, `agent-brief-template`, `multi-agent-result-merging`.

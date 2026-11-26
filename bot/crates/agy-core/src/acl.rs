@@ -558,6 +558,7 @@ const START_SPAM_SAVE_DEBOUNCE_SECS: f64 = 60.0;
 pub struct AclStore {
     path: PathBuf,
     owner_id: i64,
+    owner_ids: HashSet<i64>,
     start_notify_cooldown: u64,
     max_pending: std::sync::atomic::AtomicUsize,
     inner: RwLock<AclInner>,
@@ -581,10 +582,64 @@ impl AclStore {
         Ok(Self {
             path,
             owner_id,
+            owner_ids: HashSet::from([owner_id]),
             start_notify_cooldown,
             max_pending: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PENDING_USERS),
             inner: RwLock::new(inner),
         })
+    }
+
+    /// Registers additional owner IDs (e.g. from comma-separated `OWNER_ID` or `OWNER_IDS`).
+    /// Each extra owner is granted `RoleTier::Owner` immunity and `Approved` status.
+    pub fn with_extra_owners(mut self, extra: &[i64]) -> Self {
+        for &uid in extra {
+            if uid > 0 {
+                self.owner_ids.insert(uid);
+            }
+        }
+        if let Ok(mut guard) = self.inner.write() {
+            let now = now_secs();
+            let mut dirty = false;
+            for &uid in &self.owner_ids {
+                if uid == self.owner_id {
+                    continue;
+                }
+                let key = uid.to_string();
+                let needs_init = guard.data.users.get(&key).is_none_or(|u| {
+                    u.status != UserStatus::Approved || u.tier() != RoleTier::Owner
+                });
+                if needs_init {
+                    let entry = guard.data.users.entry(key).or_insert_with(|| AclUser {
+                        uid,
+                        status: UserStatus::Approved,
+                        role: "owner".to_string(),
+                        perms: Perms::owner(),
+                        username: None,
+                        first_name: None,
+                        last_name: None,
+                        language_code: None,
+                        is_premium: false,
+                        first_seen: now,
+                        last_seen: now,
+                        last_start_notify_ts: None,
+                        status_by: Some(self.owner_id),
+                        status_at: Some(now),
+                    });
+                    entry.status = UserStatus::Approved;
+                    entry.role = "owner".to_string();
+                    entry.perms = Perms::owner();
+                    dirty = true;
+                }
+                if guard.data.selected.iter().any(|&x| x == uid) {
+                    guard.data.selected.retain(|&x| x != uid);
+                    dirty = true;
+                }
+            }
+            if dirty {
+                let _ = atomic_write_json(&self.path, &guard.data, true);
+            }
+        }
+        self
     }
 
     /// Override the maximum number of persisted `Pending` stranger records (`ACL_MAX_PENDING`).
@@ -606,12 +661,12 @@ impl AclStore {
     }
 
     pub fn is_owner(&self, uid: i64) -> bool {
-        uid == self.owner_id
+        self.owner_ids.contains(&uid)
     }
 
-    /// Returns `true` for the owner or any user with `status == Approved`.
+    /// Returns `true` for any owner or any user with `status == Approved`.
     pub fn is_approved(&self, uid: i64) -> bool {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return true;
         }
         let Ok(guard) = self.inner.read() else {
@@ -624,9 +679,9 @@ impl AclStore {
             .is_some_and(|u| u.status == UserStatus::Approved)
     }
 
-    /// Returns the set of all approved user IDs (always includes `owner_id`).
+    /// Returns the set of all approved user IDs (always includes all owners).
     pub fn approved_ids(&self) -> HashSet<i64> {
-        let mut out = HashSet::from([self.owner_id]);
+        let mut out = self.owner_ids.clone();
         let Ok(guard) = self.inner.read() else {
             return out;
         };

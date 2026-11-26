@@ -69,8 +69,9 @@ pub const MAX_FILE_READ_BYTES: usize = 128 * 1024;
 const MAX_SESSION_MESSAGES: usize = 30;
 const MAX_SESSION_BYTES: usize = 120 * 1024;
 const MAX_STORED_MSG_CHARS: usize = 6000;
-/// In-turn context budget before compacting old tool outputs (220 KiB for deep coding turns).
-const MAX_IN_TURN_CONTEXT_BYTES: usize = 220 * 1024;
+/// In-turn context high-watermark before batch-compacting old tool outputs (160 KiB ≈ 40k tokens;
+/// prevents Context Rot while compacting down to a 65% low-watermark to preserve KV-cache prefix hits).
+const MAX_IN_TURN_CONTEXT_BYTES: usize = 160 * 1024;
 
 static AGENT_TOOL_OUTPUT_CAP: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(DEFAULT_EARLY_TOOL_OUTPUT_BYTES);
@@ -431,8 +432,8 @@ impl TurnRuntimeState {
 pub const AGENT_CORE_DISCIPLINE: &str = "Operating discipline:\n\
 - Ground every claim in tool output from this turn. Never invent paths, APIs, flags, versions or results; if unverified, say so.\n\
 - Code: locate, read, make the smallest patch, run the narrowest check, then widen. Report the command and its result.\n\
-- Never repeat an identical failing call. After two failures: stop, state the evidence, test a different hypothesis or report blocked.\n\
-- Load procedures only when needed: load_skill with code-change-protocol, grounded-answers, loop-escape, systematic-debugging or verification-before-completion; skillhub_catalog and skillhub_search browse/find more from the Claude Code ecosystem (Superpowers, Anthropic skills, ECC, wshobson, Matt Pocock).";
+- Emergency & anti-loop: never repeat an identical failing call; after 2 failures stop, state evidence, switch hypothesis or rollback (`git_ops`/`undo_edit`). On 429/timeout/MCP error: retry once with smaller scope or switch engine; on search 0 hits retry with `strict_ast=false, allow_relax=true`; on `memory_search` pass `tags:[\"tg-<uid>\"]` only.\n\
+- Load procedures only when needed: load_skill with code-change-protocol, grounded-answers, loop-escape, systematic-debugging or verification-before-completion; skillhub_catalog and skillhub_search browse/find more from the Claude Code ecosystem.";
 
 /// Identical tool calls allowed per unchanged workspace state before the third is blocked.
 const LOOP_REPEAT_LIMIT: usize = 2;
@@ -816,12 +817,15 @@ pub fn compact_in_turn_messages(messages: &mut [Value], budget_bytes: usize) -> 
 
     let mut compacted = 0usize;
     let mut current_total = total;
+    // Hysteresis low-watermark (65%): compact a full batch once triggered so subsequent steps stay
+    // below `budget_bytes` and preserve KV-cache prefix hits instead of thrashing every turn.
+    let low_watermark = (budget_bytes * 65) / 100;
 
-    // Pass 1: compact older tool outputs first while keeping the newest PRESERVE_RECENT_TOOL_MSGS intact.
+    // Pass 1: compact older tool outputs down to low_watermark while keeping newest PRESERVE_RECENT_TOOL_MSGS intact.
     if tool_indices.len() > PRESERVE_RECENT_TOOL_MSGS {
         let compact_upto = tool_indices.len() - PRESERVE_RECENT_TOOL_MSGS;
         for &idx in &tool_indices[..compact_upto] {
-            if current_total <= budget_bytes {
+            if current_total <= low_watermark {
                 break;
             }
             let Some(content) = messages[idx].get("content").and_then(Value::as_str) else {
@@ -1747,7 +1751,9 @@ pub fn agent_tools_schema_for(allow_root: bool, allow_sandbox: bool) -> Vec<Valu
                     "properties": {
                         "query": { "type": "string", "description": "Search query or Boolean dork" },
                         "profile": { "type": "string", "description": "Engine profile: hybrid (default), fast, direct, api, all" },
-                        "limit": { "type": "integer", "description": "Max results (default 10)" }
+                        "limit": { "type": "integer", "description": "Max results (default 10)" },
+                        "strict_ast": { "type": "boolean", "description": "Strict snippet AST match (default false for broader recall; true for exact dorks)" },
+                        "allow_relax": { "type": "boolean", "description": "Auto-relax query on zero results (default true)" }
                     },
                     "required": ["query"]
                 }
@@ -1802,7 +1808,8 @@ pub fn agent_tools_schema_for(allow_root: bool, allow_sandbox: bool) -> Vec<Valu
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search query" },
-                        "limit": { "type": "integer", "description": "Max results (default 5)" }
+                        "limit": { "type": "integer", "description": "Max results (default 5)" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag filter (note: ai-memory matches ANY tag; pass a single user tag like [\"tg-<uid>\"] for isolation)" }
                     },
                     "required": ["query"]
                 }
@@ -3644,12 +3651,31 @@ async fn execute_core_agent_tool(
                 return "Error: query must not be empty".to_string();
             }
             let profile = args.get("profile").and_then(Value::as_str).unwrap_or("hybrid");
-            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10).clamp(1, 30);
+            let max_results = args
+                .get("max_results")
+                .or_else(|| args.get("limit"))
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .clamp(1, 30);
+            let strict_ast = args
+                .get("strict_ast")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let allow_relax = args
+                .get("allow_relax")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             invoke_configured_mcp(
                 &cfg.mcp_config_path,
                 "search-v3",
                 "search_web_v3",
-                json!({ "query": query, "profile": profile, "limit": limit }),
+                json!({
+                    "query": query,
+                    "profile": profile,
+                    "max_results": max_results,
+                    "strict_ast": strict_ast,
+                    "allow_relax": allow_relax
+                }),
                 45.0,
                 cfg.allow_root,
             )
@@ -3955,11 +3981,23 @@ async fn execute_core_agent_tool(
         "memory_search" => {
             let query = args.get("query").and_then(Value::as_str).unwrap_or("");
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5).clamp(1, 20);
+            let mut payload = json!({ "query": query, "limit": limit });
+            if let Some(tags) = args.get("tags").and_then(Value::as_array) {
+                let clean: Vec<String> = tags
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !clean.is_empty() {
+                    payload["tags"] = json!(clean);
+                }
+            }
             invoke_configured_mcp(
                 &cfg.mcp_config_path,
                 "ai-memory",
                 "memory_search",
-                json!({ "query": query, "limit": limit }),
+                payload,
                 15.0,
                 true, // read-only search is safe
             )
@@ -7523,7 +7561,7 @@ pub async fn run_openai_agent_turn(
                         .is_some_and(|c| c.starts_with("[OpenHands Condenser State Snapshot]\n"))
                 });
                 messages.push(json!({
-                    "role": if venice_mode { "user" } else { "system" },
+                    "role": "user",
                     "content": format!("[OpenHands Condenser State Snapshot]\n{}", state_lines.join("\n"))
                 }));
             }
@@ -8714,6 +8752,17 @@ mod tests {
         for msg in &msgs[5..=8] {
             assert!(!msg["content"].as_str().unwrap().contains("compacted older tool output"));
         }
+
+        // Hysteresis check: once compacted down to 65% low-watermark, adding another small step
+        // must NOT immediately trigger another compaction pass (preserves KV-cache prefix).
+        let after_first: usize = msgs.iter().map(|m| m.to_string().len()).sum();
+        assert!(
+            after_first <= 22_000,
+            "post-compaction total should be within budget, got {after_first}"
+        );
+        msgs.push(json!({"role": "tool", "tool_call_id": "c_next", "content": "ok small"}));
+        let n2 = compact_in_turn_messages(&mut msgs, 22_000);
+        assert_eq!(n2, 0, "hysteresis must avoid thrashing compaction on the next step");
     }
 
     #[test]

@@ -538,14 +538,21 @@ class SearchOrchestrator:
 
         if self.settings.enable_query_relaxation:
             relaxed_variant = QueryRelaxer.relax(query)
-            if relaxed_variant is not None:
+            # Also fall back to non-strict matching of the original query when strict AST
+            # dropped real engine candidates due to short snippets and QueryRelaxer had no
+            # syntax tokens left to strip (e.g. `site:github.com term1 term2 term3`).
+            fallback_query = relaxed_variant if relaxed_variant is not None else (
+                query if total_dropped > 0 else None
+            )
+            if fallback_query is not None:
                 logger.info(
-                    "[relaxer] Zero yield for '%s'; retrying relaxed variant '%s'",
+                    "[relaxer] Zero yield for '%s' (ast_dropped=%d); retrying relaxed variant '%s'",
                     query,
-                    relaxed_variant,
+                    total_dropped,
+                    fallback_query,
                 )
                 relaxed_results, _ = await self._query_registry(
-                    relaxed_variant, apply_strict_ast=False
+                    fallback_query, apply_strict_ast=False
                 )
                 if relaxed_results:
                     tagged = [

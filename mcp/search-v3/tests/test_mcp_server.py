@@ -261,6 +261,55 @@ class TestMCPProtocolAndTools(unittest.TestCase):
         assert resp is not None
         self.assertEqual(resp["error"]["code"], -32600)
 
+    def test_auto_strict_ast_and_persistent_engine_health(self) -> None:
+        from core.models import PipelineSettings
+        from engine.orchestrator import SearchOrchestrator
+        from mcp_server import tools as mcp_tools
+
+        # Broad research queries default to relaxed recall; strict dorks auto-enable strict AST
+        self.assertFalse(mcp_tools._auto_strict_ast("site:github.com claude-code skill routing", None))
+        self.assertTrue(mcp_tools._auto_strict_ast("site:github.com inurl:admin filetype:sql", None))
+        self.assertTrue(mcp_tools._auto_strict_ast("plain query", True))
+        self.assertFalse(mcp_tools._auto_strict_ast("inurl:admin", False))
+
+        # Informed priors + persistent health survive across fresh SearchOrchestrator instances
+        mcp_tools._PERSISTENT_ENGINE_HEALTH.clear()
+        settings = PipelineSettings.load(
+            cli_overrides={
+                "enabled_engines": ["yahoo_direct", "ddg_html"],
+                "enable_tui": False,
+                "enable_crawl": False,
+                "enable_cache": False,
+            }
+        )
+        orch1 = SearchOrchestrator(settings)
+        mcp_tools._hydrate_registry_health(orch1.registry)
+        self.assertGreater(
+            orch1.registry.bandit.get_arm("ddg_html").alpha,
+            orch1.registry.bandit.get_arm("yahoo_direct").alpha,
+        )
+        asyncio.run(orch1.registry.record_success("ddg_html", latency_ms=120.0, result_count=5))
+        asyncio.run(
+            orch1.registry.record_failure(
+                "yahoo_direct",
+                RuntimeError("boom"),
+                latency_ms=500.0,
+            )
+        )
+        mcp_tools._persist_registry_health(orch1.registry)
+
+        orch2 = SearchOrchestrator(settings)
+        mcp_tools._hydrate_registry_health(orch2.registry)
+        self.assertGreater(
+            orch2.registry.bandit.get_arm("ddg_html").alpha,
+            orch2.registry.bandit.get_arm("yahoo_direct").alpha,
+        )
+        self.assertGreater(
+            orch2.registry.bandit.get_arm("yahoo_direct").beta,
+            orch2.registry.bandit.get_arm("ddg_html").beta,
+        )
+        mcp_tools._PERSISTENT_ENGINE_HEALTH.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

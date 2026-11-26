@@ -161,6 +161,7 @@ pub struct Config {
     pub agy_workspace: PathBuf,
     pub agy_bin: PathBuf,
     pub owner_id: i64,
+    pub owner_ids: Vec<i64>,
     pub allowed_user_ids: Vec<i64>,
     pub allow_inline_widgets: bool,
     pub webapp_base_url: String,
@@ -238,6 +239,7 @@ impl Default for Config {
             agy_workspace: PathBuf::from(DEFAULT_WORKSPACE),
             agy_bin: PathBuf::from(DEFAULT_AGY_BIN),
             owner_id: DEFAULT_OWNER_ID,
+            owner_ids: vec![DEFAULT_OWNER_ID],
             allowed_user_ids: Vec::new(),
             allow_inline_widgets: false,
             webapp_base_url: DEFAULT_WEBAPP_BASE_URL.to_string(),
@@ -311,6 +313,7 @@ impl fmt::Debug for Config {
             .field("agy_workspace", &self.agy_workspace)
             .field("agy_bin", &self.agy_bin)
             .field("owner_id", &self.owner_id)
+            .field("owner_ids", &self.owner_ids)
             .field("allowed_user_ids", &self.allowed_user_ids)
             .field("allow_inline_widgets", &self.allow_inline_widgets)
             .field("webapp_base_url", &self.webapp_base_url)
@@ -393,7 +396,18 @@ impl Config {
             cfg.agy_bin = PathBuf::from(v);
         }
         if let Some(v) = non_empty(get("OWNER_ID")) {
-            cfg.owner_id = parse_int(&v, "OWNER_ID")?;
+            let ids = parse_id_list(&v)?;
+            if let Some(&first) = ids.first() {
+                cfg.owner_id = first;
+                cfg.owner_ids = ids;
+            }
+        }
+        if let Some(v) = non_empty(get("OWNER_IDS")) {
+            for id in parse_id_list(&v)? {
+                if !cfg.owner_ids.contains(&id) {
+                    cfg.owner_ids.push(id);
+                }
+            }
         }
         if let Some(v) = get("ALLOWED_USER_IDS") {
             cfg.allowed_user_ids = parse_id_list(&v)?;
