@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Post-Update GitHub Publisher:
 # Syncs live stack changes from /root/agy-stack into the clean public repo,
-# optionally applies local sanitization rules from /etc/agy-telegram/sanitize-map.json,
-# runs gitleaks + cargo test, opens a PR, and merges on CI.
+# applies local sanitization rules from /etc/agy-telegram/sanitize-map.json,
+# runs gitleaks + cargo test, opens a PR, and enables auto-merge on CI.
 
 STACK_ROOT="${STACK_ROOT:-/root/agy-stack}"
 REPO_DIR="${CILIPY_DIR:-${STACK_ROOT}/cilipy}"
@@ -19,7 +19,7 @@ cd "$REPO_DIR"
 git checkout main
 git pull --ff-only origin main
 
-echo "[1/5] Syncing source, rules, skills, docs, and MCPs into ${REPO_DIR}..."
+echo "[1/5] Syncing source, rules, skills, docs, MCPs, and utility tools into ${REPO_DIR}..."
 rsync -a --delete --exclude='target/' --exclude='.git/' --exclude='*.bak' \
   "${STACK_ROOT}/src/ch-base/" "${REPO_DIR}/bot/"
 rsync -a --delete --exclude='*.bak' \
@@ -29,12 +29,20 @@ rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' -
 rsync -a --delete --exclude='*.bak' \
   "${STACK_ROOT}/data/workspace/telegram-docs/" "${REPO_DIR}/docs/telegram-docs/"
 rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' --exclude='*.db' \
-  --exclude='*.log' --exclude='*.zip' --exclude='benchmark_100_out/' --exclude='per_engine_runs/' \
-  --exclude='results_*.json' --exclude='workspace/cache/' --exclude='workspace/logs/' \
-  --exclude='workspace/proxies/' --exclude='workspace/configs/' --exclude='workspace/exports/' \
+  --exclude='*.log' --exclude='*.zip' --exclude='.venv/' --exclude='*.egg-info/' \
+  --exclude='benchmark_100_out/' --exclude='per_engine_runs/' --exclude='results_*.json' \
+  --exclude='workspace/cache/' --exclude='workspace/logs/' --exclude='workspace/proxies/' \
+  --exclude='workspace/configs/' --exclude='workspace/exports/' \
   "${STACK_ROOT}/mcp/search-v3/v3/" "${REPO_DIR}/mcp/search-v3/"
 rsync -a --delete --exclude='node_modules/' --exclude='dist/' --exclude='data/' --exclude='.git/' \
   "${STACK_ROOT}/mcp/skills-catalog/" "${REPO_DIR}/mcp/skills-catalog/"
+mkdir -p "${REPO_DIR}/mcp/ai-memory" "${REPO_DIR}/scripts/tools"
+for f in package.json package-lock.json stdout-guard.mjs; do
+  [ -f "${STACK_ROOT}/mcp/ai-memory/${f}" ] && cp "${STACK_ROOT}/mcp/ai-memory/${f}" "${REPO_DIR}/mcp/ai-memory/${f}"
+done
+[ -f "${STACK_ROOT}/config/mcp/agent-browser.json" ] && cp "${STACK_ROOT}/config/mcp/agent-browser.json" "${REPO_DIR}/deploy/agent-browser.json"
+[ -f "${STACK_ROOT}/app/healthcheck.sh" ] && cp "${STACK_ROOT}/app/healthcheck.sh" "${REPO_DIR}/deploy/healthcheck.sh"
+[ -d "${STACK_ROOT}/scripts/tools" ] && rsync -a --delete --exclude='__pycache__/' "${STACK_ROOT}/scripts/tools/" "${REPO_DIR}/scripts/tools/"
 
 if [ -r "$SANITIZE_MAP" ]; then
   echo "[2/5] Applying local sanitization rules from ${SANITIZE_MAP}..."
@@ -82,5 +90,5 @@ git push -u origin "$BRANCH"
 echo "[5/5] Opening Pull Request..."
 PR_URL="$(gh pr create --base main --head "$BRANCH" --title "$COMMIT_MSG" --body "Automated post-update sync verified with gitleaks and cargo test.")"
 echo "Opened PR: ${PR_URL}"
-gh pr merge "$PR_URL" --merge --auto || true
+gh pr merge "$PR_URL" --merge --delete-branch --auto || true
 git checkout main
