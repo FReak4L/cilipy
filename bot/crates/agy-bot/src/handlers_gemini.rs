@@ -11,10 +11,10 @@ use agy_core::store::UserState;
 use agy_core::tg::{CallbackQuery, Message};
 use agy_ext::agent_runtime::{clear_session_history, ThreeStageMode};
 use agy_ext::gemini_web::{
-    gemini_gem_sources_dir, sanitize_slug, GeminiAccount, GeminiAccountPool, GeminiBackendKind,
-    GeminiChatMode, GeminiGem, GeminiGemStore, DEFAULT_AISTUDIO_SIDECAR_BASE,
-    DEFAULT_GEMINI_CANVAS_MODEL, DEFAULT_GEMINI_IMAGE_MODEL, DEFAULT_GEMINI_MODEL,
-    DEFAULT_GEMINI_WEB_MODEL, DEFAULT_WEB2API_BASE, OFFICIAL_GEMINI_OPENAI_BASE,
+    discover_local_gemini_backends, gemini_gem_sources_dir, parse_account_input_lines,
+    probe_and_record_account, probe_gemini_account, sanitize_slug, GeminiAccountPool,
+    GeminiBackendKind, GeminiChatMode, GeminiGem, GeminiGemStore, DEFAULT_GEMINI_CANVAS_MODEL,
+    DEFAULT_GEMINI_IMAGE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_GEMINI_WEB_MODEL,
 };
 use agy_render::esc;
 
@@ -232,7 +232,7 @@ async fn show_gemini_accounts(
     chat_id: i64,
     cq: Option<&CallbackQuery>,
 ) {
-    let pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
+    let pool = GeminiAccountPool::load_locked(&ctx.cfg.state_dir);
     let is_owner = ctx.is_owner(uid);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -241,12 +241,12 @@ async fn show_gemini_accounts(
 
     let mut lines = vec![
         format!("{} <b>Gemini Accounts Pool</b>", ctx.e("accounts")),
-        "<i>Anti-ban: CONCURRENCY=1 · Sticky Proxy · Exponential Cooldown (2m→10m)</i>\n"
+        "<i>Anti-ban: CONCURRENCY=1 · Sticky Proxy · EWMA Decay · Auto-Delete Secrets</i>\n"
             .to_string(),
     ];
     let mut rows = Vec::new();
     if pool.accounts.is_empty() {
-        lines.push("No accounts configured yet. Add a Free AI Studio Key (0% ban risk) or a local Web2API / AIStudio2API sidecar.".to_string());
+        lines.push("No accounts configured yet. Tap <b>Smart Add</b> (paste AIza key, URL, or batch lines) or <b>Auto-Discover</b> to detect local sidecars.".to_string());
     } else {
         for a in &pool.accounts {
             let st = if !a.enabled {
@@ -258,10 +258,10 @@ async fn show_gemini_accounts(
             };
             let is_pinned = pool.active_account_id.as_deref() == Some(a.id.as_str());
             let pin = if is_pinned { " [PIN]" } else { "" };
-            let proxy_s = if a.proxy_url.is_some() {
-                format!("{} proxy", ctx.e("shield"))
-            } else {
-                "direct".to_string()
+            let proxy_s = match (a.proxy_id.as_deref(), a.proxy_url.as_deref()) {
+                (Some(pid), _) => format!("{} {pid}", ctx.e("shield")),
+                (None, Some(_)) => format!("{} custom", ctx.e("shield")),
+                _ => "direct".to_string(),
             };
             let cd = if a.is_cooled_down(now) {
                 format!(" cd={}s", a.cooldown_remaining_secs(now))
@@ -274,36 +274,25 @@ async fn show_gemini_accounts(
             } else {
                 String::new()
             };
+            let probe_s = match a.last_probe_ok {
+                Some(true) => format!(" · {}m", a.discovered_models.len()),
+                Some(false) => " · probe_err".to_string(),
+                None => String::new(),
+            };
             lines.push(format!(
-                "{st} <b>{}</b>{pin} · <code>{}</code> · <code>{}</code> · {proxy_s} · {h_pct}%{lat_s}{cd}",
+                "{st} <b>{}</b>{pin} · <code>{}</code> · <code>{}</code> · {proxy_s} · {h_pct}%{lat_s}{probe_s}{cd}",
                 esc(&a.label),
                 esc(a.kind.label()),
                 esc(&a.masked_key()),
             ));
             if is_owner {
-                rows.push(vec![
-                    ctx.btn(
-                        if is_pinned { "check" } else { "bolt" },
-                        &a.id,
-                        Some(&format!("gem:pin:{}", a.id)),
-                        if is_pinned { Some("primary") } else { None },
-                        None,
-                    ),
-                    ctx.btn(
-                        if a.enabled { "stop" } else { "ok" },
-                        if a.enabled { "Pause" } else { "Enable" },
-                        Some(&format!("gem:tog:{}", a.id)),
-                        None,
-                        None,
-                    ),
-                    ctx.btn(
-                        "remove",
-                        "Delete",
-                        Some(&format!("gem:del:{}", a.id)),
-                        Some("danger"),
-                        None,
-                    ),
-                ]);
+                rows.push(vec![ctx.btn(
+                    if is_pinned { "check" } else if !a.enabled { "stop" } else { "account" },
+                    &format!("{} ({h_pct}%)", a.label),
+                    Some(&format!("gem:v:{}", a.id)),
+                    if is_pinned { Some("primary") } else { None },
+                    None,
+                )]);
             }
         }
     }
@@ -319,17 +308,158 @@ async fn show_gemini_accounts(
             )]);
         }
         rows.push(vec![
-            ctx.btn("key", "Free AI Studio Key", Some("gem:add:official"), Some("success"), None),
-            ctx.btn("browser", "Web2API Sidecar", Some("gem:add:web"), None, None),
+            ctx.btn("add", "Smart Add (Key/URL)", Some("gem:add:auto"), Some("success"), None),
+            ctx.btn("search", "Auto-Discover", Some("gem:scan"), Some("primary"), None),
         ]);
         rows.push(vec![
-            ctx.btn("bolt", "AIStudio2API", Some("gem:add:aistudio"), None, None),
+            ctx.btn("status", "Probe All", Some("gem:probe_all"), None, None),
             ctx.btn("mcp", "Sync Proxies (AGY)", Some("gem:sync_agy"), None, None),
         ]);
     }
     rows.push(vec![ctx.btn("back", "Gemini Manager", Some("gem:home"), None, None)]);
 
     ctx.edit_or_send(cq, chat_id, &lines.join("\n"), Some(BotCtx::kb(rows))).await;
+}
+
+async fn show_gemini_account_detail(
+    ctx: &Arc<BotCtx>,
+    uid: i64,
+    chat_id: i64,
+    cq: Option<&CallbackQuery>,
+    id: &str,
+) {
+    let pool = GeminiAccountPool::load_locked(&ctx.cfg.state_dir);
+    let Some(a) = pool.get(id) else {
+        show_gemini_accounts(ctx, uid, chat_id, cq).await;
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let is_pinned = pool.active_account_id.as_deref() == Some(a.id.as_str());
+    let status = if !a.enabled {
+        format!("{} Paused", ctx.e("err"))
+    } else if a.is_cooled_down(now) {
+        format!("{} Cooldown ({}s)", ctx.e("work"), a.cooldown_remaining_secs(now))
+    } else {
+        format!("{} Ready", ctx.e("ok"))
+    };
+    let proxy_line = match (a.proxy_id.as_deref(), a.proxy_url.as_deref()) {
+        (Some(pid), _) => format!("<code>{}</code> (managed)", esc(pid)),
+        (None, Some(_)) => "<code>custom sticky proxy</code>".to_string(),
+        _ => "<code>direct</code>".to_string(),
+    };
+    let probe_line = match a.last_probe_ok {
+        Some(true) => format!(
+            "{} OK · <code>{}</code> models · <code>{:.0}ms</code>",
+            ctx.e("ok"),
+            a.discovered_models.len(),
+            a.ewma_latency_ms
+        ),
+        Some(false) => format!("{} Failed", ctx.e("err")),
+        None => "<i>Not probed yet</i>".to_string(),
+    };
+    let err_line = a
+        .last_error
+        .as_deref()
+        .map(|e| format!("\n<b>Last error:</b> <code>{}</code>", esc(e)))
+        .unwrap_or_default();
+
+    let html = format!(
+        "{ic} <b>Gemini Account: {}</b> (<code>{}</code>)\n\n\
+         <b>Status:</b> {status} · Health: <code>{}%</code>\n\
+         <b>Backend:</b> <code>{}</code>\n\
+         <b>Endpoint:</b> <code>{}</code>\n\
+         <b>Key:</b> <code>{}</code>\n\
+         <b>Email:</b> <code>{}</code>\n\
+         <b>Sticky Proxy:</b> {proxy_line}\n\
+         <b>Live Probe:</b> {probe_line}\n\
+         <b>Stats:</b> <code>{}</code> ok / <code>{}</code> fail{err_line}",
+        esc(&a.label),
+        esc(&a.id),
+        a.health_pct(now),
+        esc(a.kind.label()),
+        esc(&a.base_url),
+        esc(&a.masked_key()),
+        esc(a.email.as_deref().unwrap_or("—")),
+        a.success_count,
+        a.failure_count,
+        ic = ctx.e("account"),
+    );
+
+    let pin_cb = if is_pinned {
+        "gem:pin:auto".to_string()
+    } else {
+        format!("gem:pin:{}", a.id)
+    };
+    let rows = vec![
+        vec![
+            ctx.btn("status", "Probe Now", Some(&format!("gem:probe:{}", a.id)), Some("primary"), None),
+            ctx.btn("shield", "Bind Proxy", Some(&format!("gem:px:{}", a.id)), None, None),
+        ],
+        vec![
+            ctx.btn("key", "Rotate Key", Some(&format!("gem:key:{}", a.id)), None, None),
+            ctx.btn("edit", "Set Email", Some(&format!("gem:em:{}", a.id)), None, None),
+        ],
+        vec![
+            ctx.btn(
+                if is_pinned { "optimizer" } else { "check" },
+                if is_pinned { "Unpin (Auto)" } else { "Pin Account" },
+                Some(&pin_cb),
+                if is_pinned { Some("primary") } else { None },
+                None,
+            ),
+            ctx.btn("refresh", "Reset Health", Some(&format!("gem:rst:{}", a.id)), None, None),
+        ],
+        vec![
+            ctx.btn(
+                if a.enabled { "stop" } else { "ok" },
+                if a.enabled { "Pause" } else { "Enable" },
+                Some(&format!("gem:tog:{}", a.id)),
+                if a.enabled { None } else { Some("success") },
+                None,
+            ),
+            ctx.btn("remove", "Delete", Some(&format!("gem:delc:{}", a.id)), Some("danger"), None),
+        ],
+        vec![ctx.btn("back", "Accounts Pool", Some("gem:accts"), None, None)],
+    ];
+    ctx.edit_or_send(cq, chat_id, &html, Some(BotCtx::kb(rows))).await;
+}
+
+async fn show_gemini_proxy_picker(
+    ctx: &Arc<BotCtx>,
+    chat_id: i64,
+    cq: Option<&CallbackQuery>,
+    acc_id: &str,
+) {
+    let pool = GeminiAccountPool::load_locked(&ctx.cfg.state_dir);
+    let cur_pid = pool.get(acc_id).and_then(|a| a.proxy_id.clone());
+    let proxies = ctx.proxies.list();
+    let mut rows = vec![vec![ctx.btn(
+        if cur_pid.is_none() { "check" } else { "cancel" },
+        "Direct (No Proxy)",
+        Some(&format!("gem:pxs:{acc_id}:direct")),
+        if cur_pid.is_none() { Some("primary") } else { None },
+        None,
+    )]];
+    for p in proxies.into_iter().filter(|p| p.enabled) {
+        let active = cur_pid.as_deref() == Some(p.id.as_str());
+        rows.push(vec![ctx.btn(
+            if active { "check" } else { "shield" },
+            &format!("{} ({})", p.display_name(), p.health.quality_score),
+            Some(&format!("gem:pxs:{acc_id}:{}", p.id)),
+            if active { Some("primary") } else { None },
+            None,
+        )]);
+    }
+    rows.push(vec![ctx.btn("back", "Account Detail", Some(&format!("gem:v:{acc_id}")), None, None)]);
+    let html = format!(
+        "{} <b>Bind Sticky Proxy for <code>{}</code></b>\n<i>Pick a managed proxy from your Proxy Registry:</i>",
+        ctx.e("shield"),
+        esc(acc_id)
+    );
+    ctx.edit_or_send(cq, chat_id, &html, Some(BotCtx::kb(rows))).await;
 }
 
 async fn show_gemini_gems(
@@ -452,6 +582,7 @@ async fn show_gemini_models(
     cq: Option<&CallbackQuery>,
 ) {
     let cur = gemini_selected_model(&ctx.store.get_user(uid)).unwrap_or_else(|| "auto".to_string());
+    let pool = GeminiAccountPool::load_locked(&ctx.cfg.state_dir);
     let presets = [
         ("auto", "bolt", "Auto (Account Default)"),
         (DEFAULT_GEMINI_MODEL, "bolt", "gemini-2.5-flash (Free API)"),
@@ -462,8 +593,10 @@ async fn show_gemini_models(
         (DEFAULT_GEMINI_CANVAS_MODEL, "doc", "gemini-canvas (Web)"),
         (DEFAULT_GEMINI_IMAGE_MODEL, "image", "gemini-3.1-flash-image"),
     ];
+    let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     for (id, icon, label) in presets {
+        seen.insert(id.to_string());
         let active = cur == id;
         rows.push(vec![ctx.btn(
             if active { "check" } else { icon },
@@ -472,6 +605,19 @@ async fn show_gemini_models(
             if active { Some("primary") } else { None },
             None,
         )]);
+    }
+    // Append live discovered models from probed accounts (capped cleanly for mobile keyboards).
+    for m in pool.all_discovered_models().into_iter().filter(|m| m.len() <= 52).take(6) {
+        if seen.insert(m.clone()) {
+            let active = cur == m;
+            rows.push(vec![ctx.btn(
+                if active { "check" } else { "gemini" },
+                &m,
+                Some(&format!("gem:mset:{m}")),
+                if active { Some("primary") } else { None },
+                None,
+            )]);
+        }
     }
     rows.push(vec![ctx.btn("back", "Gemini Manager", Some("gem:home"), None, None)]);
     ctx.edit_or_send(
@@ -700,60 +846,205 @@ pub async fn handle_gemini_cb(
         ctx.ack(&cq.id, Some("Owner only"), true).await;
         return true;
     }
+    if let Some(id) = data.strip_prefix("gem:v:") {
+        ctx.ack(&cq.id, None, false).await;
+        show_gemini_account_detail(ctx, uid, chat_id, Some(cq), id).await;
+        return true;
+    }
+    if data == "gem:scan" {
+        ctx.ack(&cq.id, Some("Scanning local sidecars & env..."), false).await;
+        let found = discover_local_gemini_backends(&ctx.cfg.state_dir).await;
+        let note = if found.is_empty() {
+            format!(
+                "{} <i>No local Gemini sidecars (<code>:8083</code> / <code>:8084</code>) or <code>GEMINI_API_KEY</code> detected.</i>",
+                ctx.e("info")
+            )
+        } else {
+            let items: Vec<String> = found
+                .iter()
+                .map(|(lbl, rep)| format!("• <b>{}</b> — {}", esc(lbl), esc(&rep.detail)))
+                .collect();
+            format!(
+                "{} <b>Auto-Discovered {} backend(s):</b>\n{}",
+                ctx.e("ok"),
+                found.len(),
+                items.join("\n")
+            )
+        };
+        let _ = ctx.render.send_html_simple(chat_id, &note, None).await;
+        show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
+        return true;
+    }
+    if data == "gem:probe_all" {
+        ctx.ack(&cq.id, Some("Probing all accounts..."), false).await;
+        let ids: Vec<String> = GeminiAccountPool::load_locked(&ctx.cfg.state_dir)
+            .accounts
+            .into_iter()
+            .filter(|a| a.enabled)
+            .map(|a| a.id)
+            .collect();
+        for id in ids {
+            let _ = probe_and_record_account(&ctx.cfg.state_dir, &id).await;
+        }
+        show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
+        return true;
+    }
+    if let Some(id) = data.strip_prefix("gem:probe:") {
+        ctx.ack(&cq.id, Some("Probing account..."), false).await;
+        let _ = probe_and_record_account(&ctx.cfg.state_dir, id).await;
+        show_gemini_account_detail(ctx, uid, chat_id, Some(cq), id).await;
+        return true;
+    }
+    if let Some(id) = data.strip_prefix("gem:px:") {
+        ctx.ack(&cq.id, None, false).await;
+        show_gemini_proxy_picker(ctx, chat_id, Some(cq), id).await;
+        return true;
+    }
+    if let Some(rest) = data.strip_prefix("gem:pxs:") {
+        if let Some((acc_id, pid)) = rest.split_once(':') {
+            let (proxy_id, proxy_url) = if pid == "direct" {
+                (None, None)
+            } else {
+                let url = match ctx.proxies.resolve(Some(pid)) {
+                    ResolvedProxy::Use { url, .. } => Some(url),
+                    _ => ctx.proxies.get(pid).map(|e| e.url),
+                };
+                (Some(pid.to_string()), url)
+            };
+            let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+                pool.set_proxy_binding(acc_id, proxy_id, proxy_url);
+            });
+            ctx.ack(&cq.id, Some("Sticky proxy updated"), false).await;
+            show_gemini_account_detail(ctx, uid, chat_id, Some(cq), acc_id).await;
+            return true;
+        }
+    }
+    if let Some(id) = data.strip_prefix("gem:key:") {
+        ctx.jobs.set_awaiting(
+            uid,
+            AwaitingInput::new("gem:key", serde_json::Value::String(id.to_string())),
+        );
+        ctx.ack(&cq.id, None, false).await;
+        let mk = BotCtx::kb(vec![vec![ctx.btn("cancel", "Cancel", Some("inp:cancel"), None, None)]]);
+        let _ = ctx
+            .render
+            .send_html_simple(
+                chat_id,
+                &format!(
+                    "{} <b>Rotate API Key for <code>{}</code></b>\nSend the new API key now — your message will be deleted immediately and live-probed.",
+                    ctx.e("key"),
+                    esc(id)
+                ),
+                Some(mk),
+            )
+            .await;
+        return true;
+    }
+    if let Some(id) = data.strip_prefix("gem:em:") {
+        ctx.jobs.set_awaiting(
+            uid,
+            AwaitingInput::new("gem:em", serde_json::Value::String(id.to_string())),
+        );
+        ctx.ack(&cq.id, None, false).await;
+        let mk = BotCtx::kb(vec![vec![ctx.btn("cancel", "Cancel", Some("inp:cancel"), None, None)]]);
+        let _ = ctx
+            .render
+            .send_html_simple(
+                chat_id,
+                &format!(
+                    "{} <b>Set Email for <code>{}</code></b>\nSend email address (for Antigravity proxy sync &amp; collision checks), or send <code>clear</code> to remove.",
+                    ctx.e("edit"),
+                    esc(id)
+                ),
+                Some(mk),
+            )
+            .await;
+        return true;
+    }
+    if let Some(id) = data.strip_prefix("gem:rst:") {
+        let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+            pool.reset_cooldown(id);
+        });
+        ctx.ack(&cq.id, Some("Cooldown & health reset"), false).await;
+        show_gemini_account_detail(ctx, uid, chat_id, Some(cq), id).await;
+        return true;
+    }
     if let Some(kind_s) = data.strip_prefix("gem:add:") {
         ctx.jobs.set_awaiting(
             uid,
             AwaitingInput::new("gem:add", serde_json::Value::String(kind_s.to_string())),
         );
         ctx.ack(&cq.id, None, false).await;
-        let hint = match kind_s {
-            "official" => "<code>Label | AIza...API_KEY [| email]</code>",
-            "web" => "<code>Label | http://127.0.0.1:8083/v1 | PROXY_API_KEY [| email | socks5://...]</code>",
-            _ => "<code>Label | http://127.0.0.1:8084/v1 | PROXY_API_KEY [| email | socks5://...]</code>",
-        };
+        let mk = BotCtx::kb(vec![vec![ctx.btn("cancel", "Cancel", Some("inp:cancel"), None, None)]]);
         let _ = ctx
             .render
             .send_html_simple(
                 chat_id,
-                &format!("➕ Add Gemini Account ({kind_s}):\n{hint}\n\n(Send /cancel to abort.)"),
-                None,
+                &format!(
+                    "{} <b>Smart Add Gemini Account</b>\n\
+                     Paste any of the following (multi-line batch supported):\n\
+                     • Raw Free Key: <code>AIza...</code>\n\
+                     • Sidecar URL: <code>http://127.0.0.1:8083</code>\n\
+                     • Full format: <code>Label | Key [| email | proxy]</code>\n\
+                     • Custom URL: <code>Label | http://host:port/v1 | Key [| email]</code>\n\n\
+                     <i>{} Your message is auto-deleted immediately and live-probed.</i>",
+                    ctx.e("add"),
+                    ctx.e("shield")
+                ),
+                Some(mk),
             )
             .await;
         return true;
     }
     if let Some(id) = data.strip_prefix("gem:pin:") {
-        let mut pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
-        let msg = if id == "auto" {
-            pool.active_account_id = None;
-            "⚖️ Switched to Smart Balance".to_string()
-        } else {
-            pool.active_account_id = Some(id.to_string());
-            format!("📌 Pinned {id}")
-        };
-        let _ = pool.save(&ctx.cfg.state_dir);
+        let msg = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+            if id == "auto" {
+                pool.active_account_id = None;
+                "Switched to Smart Balance".to_string()
+            } else {
+                pool.active_account_id = Some(id.to_string());
+                format!("Pinned {id}")
+            }
+        })
+        .unwrap_or_else(|_| "Updated".to_string());
         ctx.ack(&cq.id, Some(&msg), false).await;
         show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
         return true;
     }
     if let Some(id) = data.strip_prefix("gem:tog:") {
-        let mut pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
-        let en = pool.toggle(id).unwrap_or(false);
-        let _ = pool.save(&ctx.cfg.state_dir);
-        ctx.ack(&cq.id, Some(if en { "Enabled" } else { "Disabled" }), false)
+        let en = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+            pool.toggle(id).unwrap_or(false)
+        })
+        .unwrap_or(false);
+        ctx.ack(&cq.id, Some(if en { "Enabled" } else { "Paused" }), false)
             .await;
-        show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
+        show_gemini_account_detail(ctx, uid, chat_id, Some(cq), id).await;
+        return true;
+    }
+    if let Some(id) = data.strip_prefix("gem:delc:") {
+        ctx.ack(&cq.id, None, false).await;
+        let mk = BotCtx::kb(vec![vec![
+            ctx.btn("remove", "Yes, delete", Some(&format!("gem:del:{id}")), Some("danger"), None),
+            ctx.btn("cancel", "Cancel", Some(&format!("gem:v:{id}")), None, None),
+        ]]);
+        ctx.edit_or_send(
+            Some(cq),
+            chat_id,
+            &format!("{} Delete Gemini account <code>{}</code>?", ctx.e("warn"), esc(id)),
+            Some(mk),
+        )
+        .await;
         return true;
     }
     if let Some(id) = data.strip_prefix("gem:del:") {
-        let mut pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
-        pool.remove(id);
-        let _ = pool.save(&ctx.cfg.state_dir);
-        ctx.ack(&cq.id, Some("🗑 Account removed"), false).await;
+        let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+            pool.remove(id);
+        });
+        ctx.ack(&cq.id, Some("Account removed"), false).await;
         show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
         return true;
     }
     if data == "gem:sync_agy" {
-        let mut pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
         let entries: Vec<(String, Option<String>, Option<String>)> = ctx
             .jobs
             .accounts()
@@ -770,13 +1061,15 @@ pub async fn handle_gemini_cb(
                     .collect()
             })
             .unwrap_or_default();
-        let (synced, collisions) = pool.sync_proxies_from_antigravity(&entries);
-        let _ = pool.save(&ctx.cfg.state_dir);
+        let (synced, collisions) = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+            pool.sync_proxies_from_antigravity(&entries)
+        })
+        .unwrap_or((0, Vec::new()));
         let note = if collisions.is_empty() {
-            format!("🔗 Synced {synced} sticky proxies (0 email overlaps)")
+            format!("Synced {synced} sticky proxies (0 email overlaps)")
         } else {
             format!(
-                "🔗 Synced {synced} proxies · ⚠️ {} shared email(s) with AGY",
+                "Synced {synced} proxies · {} shared email(s) with AGY",
                 collisions.len()
             )
         };
@@ -788,9 +1081,10 @@ pub async fn handle_gemini_cb(
     true
 }
 
-/// Handle `awaiting_text` inputs for `gem:add`, `gem:gnew`, `gem:gsrc`. Returns `true` if handled.
+/// Handle `awaiting_text` inputs for `gem:add`, `gem:key`, `gem:em`, `gem:gnew`, `gem:gsrc`. Returns `true` if handled.
 pub async fn handle_gemini_awaiting_text(
     ctx: &Arc<BotCtx>,
+    msg: &Message,
     uid: i64,
     chat_id: i64,
     inp: &AwaitingInput,
@@ -799,103 +1093,154 @@ pub async fn handle_gemini_awaiting_text(
     let text = raw_text.trim();
     match inp.kind.as_str() {
         "gem:add" => {
+            // Immediately delete secret-bearing Telegram message so credentials never persist in chat history!
+            let _ = ctx.client.delete_message(chat_id, msg.message_id).await;
             if !ctx.is_owner(uid) {
                 return true;
             }
-            let kind = inp
+            let hint_kind = inp
                 .data
                 .as_str()
-                .and_then(GeminiBackendKind::parse)
-                .unwrap_or(GeminiBackendKind::OfficialFreeKey);
-            let parts: Vec<&str> = text.split('|').map(str::trim).collect();
-            let (label, base_url, api_key, email, proxy_url) = match kind {
-                GeminiBackendKind::OfficialFreeKey => {
-                    if parts.len() < 2 {
-                        let _ = ctx
-                            .render
-                            .send_html_simple(
-                                chat_id,
-                                "⚠️ Expected: <code>Label | API_KEY [| email]</code>",
-                                None,
-                            )
-                            .await;
-                        return true;
-                    }
-                    (
-                        parts[0].to_string(),
-                        OFFICIAL_GEMINI_OPENAI_BASE.to_string(),
-                        parts[1].to_string(),
-                        parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                        parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                    )
-                }
-                GeminiBackendKind::Web2ApiSidecar | GeminiBackendKind::AiStudioSidecar => {
-                    let def_base = if kind == GeminiBackendKind::Web2ApiSidecar {
-                        DEFAULT_WEB2API_BASE
-                    } else {
-                        DEFAULT_AISTUDIO_SIDECAR_BASE
-                    };
-                    if parts.len() < 2 {
-                        let _ = ctx
-                            .render
-                            .send_html_simple(
-                                chat_id,
-                                "⚠️ Expected: <code>Label | base_url | API_KEY [| email | proxy_url]</code>",
-                                None,
-                            )
-                            .await;
-                        return true;
-                    }
-                    let (b, k, em, px) = if parts.len() == 2 {
-                        (def_base.to_string(), parts[1].to_string(), None, None)
-                    } else {
-                        (
-                            parts[1].to_string(),
-                            parts[2].to_string(),
-                            parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                            parts.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+                .filter(|s| *s != "auto")
+                .and_then(GeminiBackendKind::parse);
+            let existing_count = GeminiAccountPool::load_locked(&ctx.cfg.state_dir)
+                .accounts
+                .len();
+            let parsed = match parse_account_input_lines(text, hint_kind, existing_count) {
+                Ok(v) => v,
+                Err(err_msg) => {
+                    // Re-arm awaiting input so a retry never leaks into AI chat!
+                    ctx.jobs.set_awaiting(uid, inp.clone());
+                    let mk = BotCtx::kb(vec![vec![ctx.btn("cancel", "Cancel", Some("inp:cancel"), None, None)]]);
+                    let _ = ctx
+                        .render
+                        .send_html_simple(
+                            chat_id,
+                            &format!("{} {} (message deleted — try again or Cancel)", ctx.e("warn"), esc(&err_msg)),
+                            Some(mk),
                         )
-                    };
-                    (parts[0].to_string(), b, k, em, px)
+                        .await;
+                    return true;
                 }
             };
-            if let Err(err_msg) = GeminiAccountPool::validate_account_urls(&base_url, proxy_url.as_deref()) {
-                let _ = ctx
-                    .render
-                    .send_html_simple(chat_id, &format!("⚠️ {}", esc(&err_msg)), None)
-                    .await;
-                return true;
+
+            let wait = ctx
+                .render
+                .send_html_simple(
+                    chat_id,
+                    &format!("{} Verifying {} account(s) via live /models probe...", ctx.e("work"), parsed.len()),
+                    None,
+                )
+                .await
+                .ok();
+
+            let mut summary = Vec::new();
+            let mut last_added_id: Option<String> = None;
+            for mut acc in parsed {
+                let is_dup = GeminiAccountPool::load_locked(&ctx.cfg.state_dir)
+                    .find_duplicate(&acc.base_url, &acc.api_key)
+                    .is_some();
+                if is_dup {
+                    summary.push(format!("• {} <b>{}</b> — skipped (duplicate)", ctx.e("info"), esc(&acc.label)));
+                    continue;
+                }
+                let rep = probe_gemini_account(&acc).await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                acc.last_probe_epoch = now;
+                acc.last_probe_ok = Some(rep.ok);
+                if rep.ok {
+                    acc.discovered_models = rep.models.clone();
+                    acc.ewma_latency_ms = rep.latency_ms.max(1) as f64;
+                    summary.push(format!(
+                        "• {} <b>{}</b> (<code>{}</code>) — {}",
+                        ctx.e("ok"),
+                        esc(&acc.label),
+                        esc(acc.kind.label()),
+                        esc(&rep.detail)
+                    ));
+                } else {
+                    acc.last_error = Some(rep.detail.clone());
+                    summary.push(format!(
+                        "• {} <b>{}</b> saved (probe warning: <code>{}</code>)",
+                        ctx.e("warn"),
+                        esc(&acc.label),
+                        esc(&rep.detail)
+                    ));
+                }
+                let aid = acc.id.clone();
+                let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+                    pool.upsert(acc);
+                });
+                last_added_id = Some(aid);
             }
-            let mut pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
-            let id = sanitize_slug(&label);
-            pool.upsert(GeminiAccount {
-                id: id.clone(),
-                label: label.clone(),
-                email,
-                kind,
-                base_url,
-                api_key,
-                proxy_url,
-                enabled: true,
-                cooldown_until_epoch: 0,
-                consecutive_failures: 0,
-                last_used_epoch: 0,
-                last_error: None,
-                ewma_latency_ms: 0.0,
-                ewma_error_rate: 0.0,
-                success_count: 0,
-                failure_count: 0,
-            });
-            let _ = pool.save(&ctx.cfg.state_dir);
+
+            if let Some(Some(m)) = wait {
+                let _ = ctx.client.delete_message(chat_id, m.message_id).await;
+            }
             let _ = ctx
                 .render
                 .send_html_simple(
                     chat_id,
-                    &format!("✅ Added Gemini account <b>{}</b> (<code>{}</code>).", esc(&label), esc(&id)),
+                    &format!("{} <b>Onboarding Result</b> <i>(secret message deleted)</i>\n{}", ctx.e("shield"), summary.join("\n")),
                     None,
                 )
                 .await;
-            show_gemini_accounts(ctx, uid, chat_id, None).await;
+            if let Some(id) = last_added_id.filter(|_| summary.len() == 1) {
+                show_gemini_account_detail(ctx, uid, chat_id, None, &id).await;
+            } else {
+                show_gemini_accounts(ctx, uid, chat_id, None).await;
+            }
+            true
+        }
+        "gem:key" => {
+            let _ = ctx.client.delete_message(chat_id, msg.message_id).await;
+            if !ctx.is_owner(uid) {
+                return true;
+            }
+            let Some(acc_id) = inp.data.as_str() else {
+                return true;
+            };
+            if text.len() < 6 {
+                ctx.jobs.set_awaiting(uid, inp.clone());
+                let mk = BotCtx::kb(vec![vec![ctx.btn("cancel", "Cancel", Some("inp:cancel"), None, None)]]);
+                let _ = ctx
+                    .render
+                    .send_html_simple(chat_id, &format!("{} Key too short (try again or Cancel).", ctx.e("warn")), Some(mk))
+                    .await;
+                return true;
+            }
+            let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+                pool.rotate_key(acc_id, text.to_string());
+            });
+            let rep = probe_and_record_account(&ctx.cfg.state_dir, acc_id).await;
+            let status = match rep {
+                Some(r) if r.ok => format!("{} Key rotated & verified: {}", ctx.e("ok"), esc(&r.detail)),
+                Some(r) => format!("{} Key rotated (probe failed: <code>{}</code>)", ctx.e("warn"), esc(&r.detail)),
+                None => format!("{} Key rotated.", ctx.e("ok")),
+            };
+            let _ = ctx.render.send_html_simple(chat_id, &status, None).await;
+            show_gemini_account_detail(ctx, uid, chat_id, None, acc_id).await;
+            true
+        }
+        "gem:em" => {
+            if !ctx.is_owner(uid) {
+                return true;
+            }
+            let Some(acc_id) = inp.data.as_str() else {
+                return true;
+            };
+            let new_em = if text.eq_ignore_ascii_case("clear") || text == "-" {
+                None
+            } else {
+                Some(text.to_string())
+            };
+            let _ = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
+                pool.set_email(acc_id, new_em);
+            });
+            show_gemini_account_detail(ctx, uid, chat_id, None, acc_id).await;
             true
         }
         "gem:gnew" => {
