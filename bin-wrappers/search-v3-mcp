@@ -1,0 +1,5 @@
+#!/bin/sh
+# Federated Hybrid Search v3 MCP Server (stdio JSON-RPC 2.0).
+export PYTHONUNBUFFERED=1
+SEARCH_V3_PY="${SEARCH_V3_PY:-/opt/search-v3/venv/bin/python}"
+exec "$SEARCH_V3_PY" -m mcp_server.server "$@"

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Load endpoint and API key from secured /etc/agy-telegram/bot.env or environment.
+if [ -r /etc/agy-telegram/bot.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/agy-telegram/bot.env
+  set +a
+fi
+: "${VENICE_API_BASE:?VENICE_API_BASE must be set in environment or /etc/agy-telegram/bot.env}"
+: "${VENICE_API_KEY:?VENICE_API_KEY must be set in environment or /etc/agy-telegram/bot.env}"
+export VENICE_API_BASE VENICE_API_KEY
+exec /opt/agy-telegram/bin/agy-telegram --mcp-uncensored "$@"
