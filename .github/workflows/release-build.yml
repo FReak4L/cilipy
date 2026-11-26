@@ -1,0 +1,63 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build Linux Release & Checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bot
+      - name: Build release binary
+        run: cargo build --release --manifest-path bot/Cargo.toml
+      - name: Package release assets
+        run: |
+          mkdir -p dist-release
+          cp bot/target/release/agy-telegram dist-release/agy-telegram
+          tar -czf dist-release/agy-telegram-linux-x86_64.tar.gz -C dist-release agy-telegram
+          rm dist-release/agy-telegram
+          tar -czf dist-release/cilipy-rules-skills.tar.gz rules skills docs
+          (cd dist-release && sha256sum *.tar.gz > SHA256SUMS.txt)
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-release/agy-telegram-linux-x86_64.tar.gz
+            dist-release/cilipy-rules-skills.tar.gz
+            dist-release/SHA256SUMS.txt
+          generate_release_notes: true
+
+  notify-telegram:
+    name: Optional Telegram Release Notice
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    environment: production
+    if: ${{ vars.ENABLE_TG_RELEASE_NOTIFY == 'true' }}
+    steps:
+      - name: Send Telegram release message
+        env:
+          TG_TOKEN: ${{ secrets.TG_RELEASE_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_RELEASE_CHAT_ID }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ]; then
+            curl -fsSL -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=New release published: ${REPO} ${REF_NAME}"
+          fi
