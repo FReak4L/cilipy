@@ -218,7 +218,7 @@ pub async fn show_uncensored_models(
         footer.push(ctx.btn("", "‹", Some(&format!("umodels:{}", page - 1)), None, None));
     }
     footer.push(ctx.btn("refresh", t(lang, Tx::BtnRefresh), Some("umodels:refresh"), None, None));
-    footer.push(ctx.btn("", "🌐 Web Model", Some("webmodel:home"), None, None));
+    footer.push(ctx.btn("browser", "Web Model", Some("webmodel:home"), None, None));
     footer.push(ctx.btn("menu", t(lang, Tx::BtnMenu), Some("home"), None, None));
     if page + 1 < pages {
         footer.push(ctx.btn("", "›", Some(&format!("umodels:{}", page + 1)), None, None));

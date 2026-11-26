@@ -404,7 +404,7 @@ impl BotCtx {
                 let mut engines = Vec::new();
                 if self.has_perm(uid, "uncensored") {
                     engines.push(self.btn(
-                        "fire",
+                        "browser",
                         t(lang, Tx::BtnUncensored),
                         Some("webmodel:home"),
                         None,
