@@ -4,6 +4,9 @@ updates:
     directory: "/bot"
     schedule:
       interval: "weekly"
+    ignore:
+      - dependency-name: "sha2"
+        versions: [">= 0.11.0"]
   - package-ecosystem: "pip"
     directory: "/mcp/search-v3"
     schedule:
