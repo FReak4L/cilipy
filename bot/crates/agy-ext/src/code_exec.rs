@@ -218,6 +218,19 @@ def call_mcp_tool(server: str, tool: str, arguments=None, timeout_secs: int = 30
     )
 
 
+def gortex_search(query: str, limit: int = 10) -> str:
+    return call_mcp_tool("gortex", "search", {"query": query, "limit": int(limit)})
+
+
+def search_docs(library: str, query: str) -> str:
+    resolved = call_mcp_tool("context7", "resolve-library-id", {"libraryName": library, "query": query})
+    return f"[resolve]\n{resolved}"
+
+
+def read_range(path: str, start_line: int = 1, end_line: int = 120) -> str:
+    return read_file(path, start_line=int(start_line), end_line=int(end_line))
+
+
 def inspect_image(path: str, question: str = "", model: str = "") -> str:
     args = {"path": path}
     if question:
