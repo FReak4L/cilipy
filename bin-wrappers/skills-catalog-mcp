@@ -1,0 +1,4 @@
+#!/bin/sh
+# skills-catalog MCP wrapper (optional GITHUB_TOKEN loaded from 0600 env file).
+[ -r /root/.config/skills-mcp/env ] && { set -a; . /root/.config/skills-mcp/env; set +a; }
+exec /usr/bin/node /opt/skills-mcp/dist/index.js "$@"

@@ -1,0 +1,8 @@
+#!/bin/sh
+# mcp-ai-memory launcher (credentials loaded ONLY from 0600 env file).
+set -a
+. /etc/agy-telegram/mcp-ai-memory.env
+set +a
+export DOTENV_CONFIG_QUIET=true
+exec /usr/bin/node --import file:///opt/mcp-ai-memory/stdout-guard.mjs \
+  /opt/mcp-ai-memory/node_modules/mcp-ai-memory/dist/cli.js "$@"

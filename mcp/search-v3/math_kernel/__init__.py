@@ -1,0 +1,65 @@
+"""Pure-Math & NLP Optimization Kernel package exports."""
+
+from math_kernel.ast_boolean import (
+    AndNode,
+    ASTNode,
+    Bit,
+    BooleanASTParser,
+    CompiledBooleanAST,
+    DocumentView,
+    ExactPhraseNode,
+    FileTypeNode,
+    InTextNode,
+    InTitleNode,
+    InURLNode,
+    NotNode,
+    OrNode,
+    PredicateNode,
+    SiteNode,
+    TermNode,
+    compile_boolean_query,
+    tokenize_boolean_query,
+)
+from math_kernel.bandit_scheduler import BetaArmState, ThompsonSamplingScheduler
+from math_kernel.deduplicator import (
+    DeduplicationDecision,
+    SimHashJaccardDeduplicator,
+    compute_simhash64,
+    hamming_distance64,
+    jaccard_similarity,
+    tokenize_text,
+)
+from math_kernel.math_nlp_kernel import MathNLPKernel
+from math_kernel.pacing_poisson import DynamicPoissonPacer, PoissonPacer
+
+__all__ = [
+    "ASTNode",
+    "AndNode",
+    "BetaArmState",
+    "Bit",
+    "BooleanASTParser",
+    "CompiledBooleanAST",
+    "DeduplicationDecision",
+    "DocumentView",
+    "DynamicPoissonPacer",
+    "ExactPhraseNode",
+    "FileTypeNode",
+    "InTextNode",
+    "InTitleNode",
+    "InURLNode",
+    "MathNLPKernel",
+    "NotNode",
+    "OrNode",
+    "PoissonPacer",
+    "PredicateNode",
+    "SimHashJaccardDeduplicator",
+    "SiteNode",
+    "TermNode",
+    "ThompsonSamplingScheduler",
+    "compile_boolean_query",
+    "compute_simhash64",
+    "hamming_distance64",
+    "jaccard_similarity",
+    "tokenize_boolean_query",
+    "tokenize_text",
+]
