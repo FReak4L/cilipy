@@ -1,0 +1,63 @@
+{
+  "mcpServers": {
+    "ai-memory": {
+      "command": "/root/.local/bin/ai-memory-mcp"
+    },
+    "context7": {
+      "command": "/usr/bin/context7-mcp"
+    },
+    "gortex": {
+      "command": "/root/.local/bin/gortex",
+      "args": ["mcp"]
+    },
+    "graphify": {
+      "command": "/root/.local/bin/graphify-mcp",
+      "args": ["/root/agy-workspace/graphify-out/graph.json"]
+    },
+    "search-v3": {
+      "command": "/root/.local/bin/search-v3-mcp",
+      "disabled": false
+    },
+    "skillport": {
+      "command": "/root/.local/bin/skillport-mcp",
+      "env": {
+        "SKILLPORT_SKILLS_DIR": "/root/.gemini/config/skills"
+      }
+    },
+    "skills-catalog": {
+      "command": "/root/.local/bin/skills-catalog-mcp"
+    },
+    "venice-uncensored": {
+      "command": "/opt/agy-telegram/bin/agy-telegram",
+      "args": ["--mcp-uncensored"],
+      "env": {
+        "VENICE_API_BASE": "https://api.example.com/v1",
+        "VENICE_API_KEY": "REPLACE_WITH_VENICE_API_KEY"
+      }
+    },
+    "skillhub": {
+      "command": "/opt/agy-telegram/bin/agy-telegram",
+      "args": ["--mcp-skillhub"],
+      "env": {
+        "STATE_DIR": "/var/lib/agy-telegram"
+      }
+    },
+    "openhands": {
+      "command": "/opt/agy-telegram/bin/agy-telegram",
+      "args": ["--mcp-openhands"],
+      "env": {
+        "AGY_WORKSPACE": "/root/agy-workspace",
+        "STATE_DIR": "/var/lib/agy-telegram"
+      }
+    },
+    "browser": {
+      "command": "/usr/bin/agent-browser",
+      "args": ["mcp", "--config", "/root/agy-stack/config/mcp/agent-browser.json"],
+      "env": {
+        "AGENT_BROWSER_CONFIG": "/root/agy-stack/config/mcp/agent-browser.json",
+        "AGENT_BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
+        "AGENT_BROWSER_SOCKET_DIR": "/tmp/agent-browser"
+      }
+    }
+  }
+}

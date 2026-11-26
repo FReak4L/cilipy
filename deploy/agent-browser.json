@@ -1,0 +1,8 @@
+{
+  "headed": false,
+  "idleTimeout": "10m",
+  "maxOutput": 24000,
+  "screenshotFormat": "jpeg",
+  "screenshotQuality": 75,
+  "args": "--disable-dev-shm-usage,--no-sandbox,--disable-gpu,--disable-extensions"
+}
