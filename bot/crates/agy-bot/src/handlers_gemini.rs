@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use agy_core::proxies::ResolvedProxy;
 use agy_core::store::UserState;
-use agy_core::tg::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message};
+use agy_core::tg::{CallbackQuery, Message};
 use agy_ext::agent_runtime::{clear_session_history, ThreeStageMode};
 use agy_ext::gemini_web::{
     gemini_gem_sources_dir, sanitize_slug, GeminiAccount, GeminiAccountPool, GeminiBackendKind,
@@ -19,6 +19,7 @@ use agy_ext::gemini_web::{
 use agy_render::esc;
 
 use crate::ctx::BotCtx;
+use crate::i18n::{t, Tx};
 use crate::jobs::AwaitingInput;
 
 pub const GEMINI_MODE_KEY: &str = "gemini_mode";
@@ -67,57 +68,68 @@ pub fn gemini_session_key(uid: i64) -> String {
     format!("gemini_web_{uid}")
 }
 
-fn btn(text: impl Into<String>, data: impl Into<String>) -> InlineKeyboardButton {
-    InlineKeyboardButton::callback(text, data)
-}
-
-/// Render the unified `🌐 Web Model` hub (`🔥 Venice` + `💎 Gemini Manager`).
+/// Render the unified `🌐 Web Model` hub (`🔥 Venice` + `✨ Gemini Manager`).
 pub async fn show_web_model_hub(
     ctx: &Arc<BotCtx>,
     uid: i64,
     chat_id: i64,
     cq: Option<&CallbackQuery>,
 ) {
+    let lang = ctx.lang(uid);
     let u = ctx.store.get_user(uid);
     let eng = u.extra.get("engine").and_then(|v| v.as_str()).unwrap_or("agy");
     let pool = GeminiAccountPool::load(&ctx.cfg.state_dir);
     let gems = GeminiGemStore::load(&ctx.cfg.state_dir);
     let g_mode = gemini_chat_mode(&u);
     let active_tag = match eng {
-        "uncensored" => "🔥 Venice Uncensored",
-        "gemini_web" => "💎 Gemini Manager",
-        _ => "Antigravity (default)",
+        "uncensored" => format!("{} Venice Uncensored", ctx.e("fire")),
+        "gemini_web" => format!("{} Gemini Manager", ctx.e("gemini")),
+        _ => "Antigravity (default)".to_string(),
     };
 
     let html = format!(
-        "<b>🌐 Web Model Hub</b>\n\n\
-         Active engine: <code>{active_tag}</code>\n\
-         • <b>🔥 Venice</b>: Uncensored OpenHands Agent / Chat\n\
-         • <b>💎 Gemini Manager</b>: <code>{}</code> accs · <code>{}</code> Gems · Mode: <code>{}</code>\n\n\
+        "{ic_web} <b>Web Model Hub</b>\n\n\
+         <b>Active engine:</b> {active_tag}\n\
+         • {ic_fire} <b>Venice</b>: Uncensored OpenHands Agent / Chat\n\
+         • {ic_gem} <b>Gemini Manager</b>: <code>{}</code> accs · <code>{}</code> Gems · Mode: <code>{}</code>\n\n\
          <i>Choose a provider below:</i>",
         pool.accounts.len(),
         gems.gems.len(),
-        esc(g_mode.label())
+        esc(g_mode.label()),
+        ic_web = ctx.e("browser"),
+        ic_fire = ctx.e("fire"),
+        ic_gem = ctx.e("gemini"),
     );
-    let markup = InlineKeyboardMarkup {
-        inline_keyboard: vec![
-            vec![
-                btn("🔥 Venice", "umodels:0"),
-                btn("💎 Gemini Manager", "gem:home"),
-            ],
-            vec![btn("⬅️ Home", "home:0")],
+    let markup = BotCtx::kb(vec![
+        vec![
+            ctx.btn(
+                "fire",
+                "Venice Uncensored",
+                Some("umodels:0"),
+                if eng == "uncensored" { Some("primary") } else { None },
+                None,
+            ),
+            ctx.btn(
+                "gemini",
+                "Gemini Manager",
+                Some("gem:home"),
+                if eng == "gemini_web" { Some("primary") } else { None },
+                None,
+            ),
         ],
-    };
+        vec![ctx.btn("menu", t(lang, Tx::BtnMenu), Some("home"), None, None)],
+    ]);
     ctx.edit_or_send(cq, chat_id, &html, Some(markup)).await;
 }
 
-/// Render the `💎 Gemini Manager` main dashboard.
+/// Render the `✨ Gemini Manager` main dashboard.
 pub async fn show_gemini_home(
     ctx: &Arc<BotCtx>,
     uid: i64,
     chat_id: i64,
     cq: Option<&CallbackQuery>,
 ) {
+    let lang = ctx.lang(uid);
     let u = ctx.store.get_user(uid);
     let is_active = u.extra.get("engine").and_then(|v| v.as_str()) == Some("gemini_web");
     let mode = gemini_chat_mode(&u);
@@ -146,12 +158,17 @@ pub async fn show_gemini_home(
         String::new()
     } else {
         format!(
-            "\n⚠️ <b>Anti-Ban Notice:</b> Web sidecar email(s) overlap Antigravity: <code>{}</code>. Keep concurrency=1 &amp; sticky proxy.",
+            "\n{} <b>Anti-Ban Notice:</b> Web sidecar email(s) overlap Antigravity: <code>{}</code>. Keep concurrency=1 &amp; sticky proxy.",
+            ctx.e("warn"),
             esc(&collisions.join(", "))
         )
     };
 
-    let status_badge = if is_active { "✅ ACTIVE" } else { "⚪ inactive" };
+    let status_badge = if is_active {
+        format!("{} ACTIVE", ctx.e("ok"))
+    } else {
+        "inactive".to_string()
+    };
     let ts_label = match ts {
         ThreeStageMode::Auto => "Auto",
         ThreeStageMode::Always => "Always",
@@ -159,7 +176,7 @@ pub async fn show_gemini_home(
     };
 
     let html = format!(
-        "<b>💎 Gemini Manager</b> ({status_badge})\n\n\
+        "{ic_gem} <b>Gemini Manager</b> ({status_badge})\n\n\
          <b>Mode:</b> <code>{}</code>\n\
          <b>Model:</b> <code>{}</code>\n\
          <b>Active Gem:</b> {active_gem_line}\n\
@@ -168,58 +185,45 @@ pub async fn show_gemini_home(
         esc(mode.label()),
         esc(&model),
         pool.accounts.len(),
+        ic_gem = ctx.e("gemini"),
     );
 
+    let m_style = |m: GeminiChatMode| -> Option<&'static str> {
+        if mode == m { Some("primary") } else { None }
+    };
     let rows = vec![
         vec![
-            btn(
-                if mode == GeminiChatMode::Agent { "✅ 🤖 Agent" } else { "🤖 Agent" },
-                "gem:mode:agent",
-            ),
-            btn(
-                if mode == GeminiChatMode::Canvas { "✅ 📝 Canvas" } else { "📝 Canvas" },
-                "gem:mode:canvas",
-            ),
+            ctx.btn("codeintel", "Agent", Some("gem:mode:agent"), m_style(GeminiChatMode::Agent), None),
+            ctx.btn("doc", "Canvas", Some("gem:mode:canvas"), m_style(GeminiChatMode::Canvas), None),
         ],
         vec![
-            btn(
-                if mode == GeminiChatMode::Image { "✅ 🖼 Image" } else { "🖼 Image" },
-                "gem:mode:image",
+            ctx.btn("image", "Image Create", Some("gem:mode:image"), m_style(GeminiChatMode::Image), None),
+            ctx.btn("support", "Chat", Some("gem:mode:chat"), m_style(GeminiChatMode::Chat), None),
+        ],
+        vec![
+            ctx.btn(
+                if is_active { "ok" } else { "bolt" },
+                if is_active { "Active (Gemini)" } else { "Activate Gemini" },
+                Some("gem:use"),
+                if is_active { Some("success") } else { Some("primary") },
+                None,
             ),
-            btn(
-                if mode == GeminiChatMode::Chat { "✅ 💬 Chat" } else { "💬 Chat" },
-                "gem:mode:chat",
-            ),
+            ctx.btn("memory", &format!("3-Stage: {ts_label}"), Some("gem:3stage"), None, None),
         ],
         vec![
-            btn(
-                if is_active { "💎 Active (Gemini)" } else { "✅ Activate Gemini" },
-                "gem:use",
-            ),
-            btn(format!("🧠 3-Stage: {ts_label}"), "gem:3stage"),
+            ctx.btn("accounts", &format!("Accounts ({})", pool.accounts.len()), Some("gem:accts"), None, None),
+            ctx.btn("skills", &format!("Gems Studio ({})", gems.gems.len()), Some("gem:gems"), None, None),
         ],
         vec![
-            btn(format!("👤 Accounts ({})", pool.accounts.len()), "gem:accts"),
-            btn(format!("💎 Gems Studio ({})", gems.gems.len()), "gem:gems"),
+            ctx.btn("model", "Models", Some("gem:models"), None, None),
+            ctx.btn("remove", "Clear Chat", Some("gem:clear"), Some("danger"), None),
         ],
         vec![
-            btn("🤖 Models", "gem:models"),
-            btn("🗑 Clear Chat", "gem:clear"),
-        ],
-        vec![
-            btn("⬅️ Web Model", "webmodel:home"),
-            btn("🏠 Home", "home:0"),
+            ctx.btn("back", "Web Model", Some("webmodel:home"), None, None),
+            ctx.btn("menu", t(lang, Tx::BtnMenu), Some("home"), None, None),
         ],
     ];
-    ctx.edit_or_send(
-        cq,
-        chat_id,
-        &html,
-        Some(InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        }),
-    )
-    .await;
+    ctx.edit_or_send(cq, chat_id, &html, Some(BotCtx::kb(rows))).await;
 }
 
 async fn show_gemini_accounts(
@@ -236,7 +240,7 @@ async fn show_gemini_accounts(
         .unwrap_or(0);
 
     let mut lines = vec![
-        "<b>👤 Gemini Accounts Pool</b>".to_string(),
+        format!("{} <b>Gemini Accounts Pool</b>", ctx.e("accounts")),
         "<i>Anti-ban: CONCURRENCY=1 · Sticky Proxy · Exponential Cooldown (2m→10m)</i>\n"
             .to_string(),
     ];
@@ -246,18 +250,19 @@ async fn show_gemini_accounts(
     } else {
         for a in &pool.accounts {
             let st = if !a.enabled {
-                "⛔"
+                ctx.e("err")
             } else if a.is_cooled_down(now) {
-                "⏳"
+                ctx.e("work")
             } else {
-                "✅"
+                ctx.e("ok")
             };
-            let pin = if pool.active_account_id.as_deref() == Some(a.id.as_str()) {
-                " 📌"
+            let is_pinned = pool.active_account_id.as_deref() == Some(a.id.as_str());
+            let pin = if is_pinned { " [PIN]" } else { "" };
+            let proxy_s = if a.proxy_url.is_some() {
+                format!("{} proxy", ctx.e("shield"))
             } else {
-                ""
+                "direct".to_string()
             };
-            let proxy_s = if a.proxy_url.is_some() { "🛡proxy" } else { "direct" };
             let cd = if a.is_cooled_down(now) {
                 format!(" cd={}s", a.cooldown_remaining_secs(now))
             } else {
@@ -277,9 +282,27 @@ async fn show_gemini_accounts(
             ));
             if is_owner {
                 rows.push(vec![
-                    btn(format!("📌 {}", a.id), format!("gem:pin:{}", a.id)),
-                    btn("⏯", format!("gem:tog:{}", a.id)),
-                    btn("🗑", format!("gem:del:{}", a.id)),
+                    ctx.btn(
+                        if is_pinned { "check" } else { "bolt" },
+                        &a.id,
+                        Some(&format!("gem:pin:{}", a.id)),
+                        if is_pinned { Some("primary") } else { None },
+                        None,
+                    ),
+                    ctx.btn(
+                        if a.enabled { "stop" } else { "ok" },
+                        if a.enabled { "Pause" } else { "Enable" },
+                        Some(&format!("gem:tog:{}", a.id)),
+                        None,
+                        None,
+                    ),
+                    ctx.btn(
+                        "remove",
+                        "Delete",
+                        Some(&format!("gem:del:{}", a.id)),
+                        Some("danger"),
+                        None,
+                    ),
                 ]);
             }
         }
@@ -287,28 +310,26 @@ async fn show_gemini_accounts(
 
     if is_owner {
         if pool.active_account_id.is_some() {
-            rows.push(vec![btn("⚖️ Auto Smart Balance (Unpin)", "gem:pin:auto")]);
+            rows.push(vec![ctx.btn(
+                "optimizer",
+                "Auto Smart Balance",
+                Some("gem:pin:auto"),
+                Some("primary"),
+                None,
+            )]);
         }
         rows.push(vec![
-            btn("➕ Free AI Studio Key", "gem:add:official"),
-            btn("➕ Web2API Sidecar", "gem:add:web"),
+            ctx.btn("key", "Free AI Studio Key", Some("gem:add:official"), Some("success"), None),
+            ctx.btn("browser", "Web2API Sidecar", Some("gem:add:web"), None, None),
         ]);
         rows.push(vec![
-            btn("➕ AIStudio2API", "gem:add:aistudio"),
-            btn("🔗 Sync Proxies (AGY)", "gem:sync_agy"),
+            ctx.btn("bolt", "AIStudio2API", Some("gem:add:aistudio"), None, None),
+            ctx.btn("mcp", "Sync Proxies (AGY)", Some("gem:sync_agy"), None, None),
         ]);
     }
-    rows.push(vec![btn("⬅️ Gemini Manager", "gem:home")]);
+    rows.push(vec![ctx.btn("back", "Gemini Manager", Some("gem:home"), None, None)]);
 
-    ctx.edit_or_send(
-        cq,
-        chat_id,
-        &lines.join("\n"),
-        Some(InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        }),
-    )
-    .await;
+    ctx.edit_or_send(cq, chat_id, &lines.join("\n"), Some(BotCtx::kb(rows))).await;
 }
 
 async fn show_gemini_gems(
@@ -322,53 +343,54 @@ async fn show_gemini_gems(
     let store = GeminiGemStore::load(&ctx.cfg.state_dir);
 
     let mut lines = vec![
-        "<b>💎 Gems Studio (System Prompts + Knowledge Sources)</b>".to_string(),
+        format!("{} <b>Gems Studio (System Prompts + Knowledge Sources)</b>", ctx.e("gemini")),
         "<i>Portable across all accounts &amp; failovers. Attach local source files or bind a Web2API `gem-&lt;id&gt;`.</i>\n".to_string(),
     ];
-    let mut rows = vec![vec![btn(
-        if active.is_none() {
-            "✅ 🚫 No Gem (Default)"
-        } else {
-            "🚫 No Gem (Default)"
-        },
-        "gem:guse:none",
+    let mut rows = vec![vec![ctx.btn(
+        if active.is_none() { "check" } else { "cancel" },
+        "No Gem (Default)",
+        Some("gem:guse:none"),
+        if active.is_none() { Some("primary") } else { None },
+        None,
     )]];
 
     for g in &store.gems {
-        let mark = if active.as_deref() == Some(g.id.as_str()) {
-            "✅ "
-        } else {
-            ""
-        };
+        let is_act = active.as_deref() == Some(g.id.as_str());
+        let mark = if is_act { format!("{} ", ctx.e("ok")) } else { String::new() };
         let remote = g
             .remote_gem_id
             .as_deref()
             .map(|r| format!(" · <code>{r}</code>"))
             .unwrap_or_default();
         lines.push(format!(
-            "{mark}<b>{}</b> (<code>{}</code>) · 📎 {} files{remote}",
+            "{mark}<b>{}</b> (<code>{}</code>) · {} {} files{remote}",
             esc(&g.name),
             esc(&g.id),
+            ctx.e("file"),
             g.source_files.len(),
         ));
         rows.push(vec![
-            btn(format!("{mark}💎 {}", g.name), format!("gem:gview:{}", g.id)),
-            btn("Use", format!("gem:guse:{}", g.id)),
+            ctx.btn(
+                "skills",
+                &g.name,
+                Some(&format!("gem:gview:{}", g.id)),
+                if is_act { Some("primary") } else { None },
+                None,
+            ),
+            ctx.btn(
+                if is_act { "check" } else { "bolt" },
+                if is_act { "Active" } else { "Use" },
+                Some(&format!("gem:guse:{}", g.id)),
+                if is_act { Some("success") } else { None },
+                None,
+            ),
         ]);
     }
 
-    rows.push(vec![btn("➕ Create New Gem", "gem:gnew")]);
-    rows.push(vec![btn("⬅️ Gemini Manager", "gem:home")]);
+    rows.push(vec![ctx.btn("add", "Create New Gem", Some("gem:gnew"), Some("success"), None)]);
+    rows.push(vec![ctx.btn("back", "Gemini Manager", Some("gem:home"), None, None)]);
 
-    ctx.edit_or_send(
-        cq,
-        chat_id,
-        &lines.join("\n"),
-        Some(InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        }),
-    )
-    .await;
+    ctx.edit_or_send(cq, chat_id, &lines.join("\n"), Some(BotCtx::kb(rows))).await;
 }
 
 async fn show_gem_detail(
@@ -400,34 +422,27 @@ async fn show_gem_detail(
             .join("\n")
     };
     let html = format!(
-        "<b>💎 Gem: {}</b> (<code>{}</code>)\n\n\
+        "{ic_gem} <b>Gem: {}</b> (<code>{}</code>)\n\n\
          <b>Instructions:</b>\n<pre>{}</pre>\n\
          <b>Knowledge Sources ({}):</b>\n{src_list}",
         esc(&g.name),
         esc(&g.id),
         esc(&preview),
         g.source_files.len(),
+        ic_gem = ctx.e("gemini"),
     );
     let rows = vec![
         vec![
-            btn("✅ Activate Gem", format!("gem:guse:{}", g.id)),
-            btn("📎 Add Source", format!("gem:gsrc:{}", g.id)),
+            ctx.btn("check", "Activate Gem", Some(&format!("gem:guse:{}", g.id)), Some("success"), None),
+            ctx.btn("file", "Add Source", Some(&format!("gem:gsrc:{}", g.id)), Some("primary"), None),
         ],
         vec![
-            btn("🧹 Clear Sources", format!("gem:gclr:{}", g.id)),
-            btn("🗑 Delete Gem", format!("gem:gdel:{}", g.id)),
+            ctx.btn("refresh", "Clear Sources", Some(&format!("gem:gclr:{}", g.id)), None, None),
+            ctx.btn("remove", "Delete Gem", Some(&format!("gem:gdel:{}", g.id)), Some("danger"), None),
         ],
-        vec![btn("⬅️ Gems Studio", "gem:gems")],
+        vec![ctx.btn("back", "Gems Studio", Some("gem:gems"), None, None)],
     ];
-    ctx.edit_or_send(
-        cq,
-        chat_id,
-        &html,
-        Some(InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        }),
-    )
-    .await;
+    ctx.edit_or_send(cq, chat_id, &html, Some(BotCtx::kb(rows))).await;
 }
 
 async fn show_gemini_models(
@@ -438,28 +453,32 @@ async fn show_gemini_models(
 ) {
     let cur = gemini_selected_model(&ctx.store.get_user(uid)).unwrap_or_else(|| "auto".to_string());
     let presets = [
-        ("auto", "⚡ Auto (Account Default)"),
-        (DEFAULT_GEMINI_MODEL, "⚡ gemini-2.5-flash (Free API)"),
-        ("gemini-2.5-pro", "🧠 gemini-2.5-pro"),
-        (DEFAULT_GEMINI_WEB_MODEL, "💧 gemini-4-hydrogen (Web)"),
-        ("gemini-4-neon", "🔮 gemini-4-neon (Web Pro)"),
-        ("gemini-4-carbon", "🔥 gemini-4-carbon (Web Pro)"),
-        (DEFAULT_GEMINI_CANVAS_MODEL, "📝 gemini-canvas (Web)"),
-        (DEFAULT_GEMINI_IMAGE_MODEL, "🖼 gemini-3.1-flash-image"),
+        ("auto", "bolt", "Auto (Account Default)"),
+        (DEFAULT_GEMINI_MODEL, "bolt", "gemini-2.5-flash (Free API)"),
+        ("gemini-2.5-pro", "memory", "gemini-2.5-pro"),
+        (DEFAULT_GEMINI_WEB_MODEL, "gemini", "gemini-4-hydrogen (Web)"),
+        ("gemini-4-neon", "skills", "gemini-4-neon (Web Pro)"),
+        ("gemini-4-carbon", "fire", "gemini-4-carbon (Web Pro)"),
+        (DEFAULT_GEMINI_CANVAS_MODEL, "doc", "gemini-canvas (Web)"),
+        (DEFAULT_GEMINI_IMAGE_MODEL, "image", "gemini-3.1-flash-image"),
     ];
     let mut rows = Vec::new();
-    for (id, label) in presets {
-        let mark = if cur == id { "✅ " } else { "" };
-        rows.push(vec![btn(format!("{mark}{label}"), format!("gem:mset:{id}"))]);
+    for (id, icon, label) in presets {
+        let active = cur == id;
+        rows.push(vec![ctx.btn(
+            if active { "check" } else { icon },
+            label,
+            Some(&format!("gem:mset:{id}")),
+            if active { Some("primary") } else { None },
+            None,
+        )]);
     }
-    rows.push(vec![btn("⬅️ Gemini Manager", "gem:home")]);
+    rows.push(vec![ctx.btn("back", "Gemini Manager", Some("gem:home"), None, None)]);
     ctx.edit_or_send(
         cq,
         chat_id,
-        &format!("<b>🤖 Gemini Models</b>\nCurrent: <code>{}</code>", esc(&cur)),
-        Some(InlineKeyboardMarkup {
-            inline_keyboard: rows,
-        }),
+        &format!("{} <b>Gemini Models</b>\nCurrent: <code>{}</code>", ctx.e("model"), esc(&cur)),
+        Some(BotCtx::kb(rows)),
     )
     .await;
 }
