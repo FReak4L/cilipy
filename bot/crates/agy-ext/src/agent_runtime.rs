@@ -429,11 +429,26 @@ impl TurnRuntimeState {
 
 /// Compact reasoning/grounding/loop discipline appended to every agent-mode system prompt.
 /// Full procedures stay on disk as skills and are pulled on demand via `load_skill`.
-pub const AGENT_CORE_DISCIPLINE: &str = "Operating discipline:\n\
-- Ground every claim in tool output from this turn. Never invent paths, APIs, flags, versions or results; if unverified, say so.\n\
-- Code: locate, read, make the smallest patch, run the narrowest check, then widen. Report the command and its result.\n\
-- Emergency & anti-loop: never repeat an identical failing call; after 2 failures stop, state evidence, switch hypothesis or rollback (`git_ops`/`undo_edit`). On 429/timeout/MCP error: retry once with smaller scope or switch engine; on search 0 hits retry with `strict_ast=false, allow_relax=true`; on `memory_search` pass `tags:[\"tg-<uid>\"]` only.\n\
-- Load procedures only when needed: load_skill with code-change-protocol, grounded-answers, loop-escape, systematic-debugging or verification-before-completion; skillhub_catalog and skillhub_search browse/find more from the Claude Code ecosystem.";
+pub const AGENT_CORE_DISCIPLINE: &str = "<kernel>\n\
+<invariants>\n\
+- GROUNDING: every claim MUST cite fresh tool output from this turn; never invent paths/APIs/flags/versions/results.\n\
+- CODE: locate -> read exact lines -> smallest reversible patch -> narrowest check -> widen; report cmd + result.\n\
+</invariants>\n\
+<tool_ladder>\n\
+- TIER_0: steps>=3 | log_filter | zip | multi_grep_edit_verify -> execute_code(python3+agy_tools; print() <=4KB).\n\
+- TIER_1: batch_read, multi_edit, file_editor, repo_map, verify_project, web_search(strict_ast=false,allow_relax=true), memory_search(tags:[\"tg-<uid>\"]).\n\
+- TIER_2: single native read/edit ONLY for trivial 1-file ops or CommandGuard-blocked paths.\n\
+</tool_ladder>\n\
+<lenses skip_if=\"simple_qa\">\n\
+- bug/edit: FIRST_PRINCIPLES(hard constraints) + SKEPTIC(>=1 disconfirming test).\n\
+- arch/risky: + PRE_MORTEM(top 2 prod failures+guards) + BUILDER(smallest reversible win) + SECOND_ORDER(KV-cache/tokens/failover/security).\n\
+</lenses>\n\
+<emergency>\n\
+- fail>=2|loop -> STOP identical retry, state stderr, switch hypothesis or undo_edit/git_ops restore (load_skill: loop-escape).\n\
+- 429|timeout|0_hits -> narrow scope/batch via execute_code; search fallback strict_ast=false,allow_relax=true.\n\
+- skills_on_demand: load_skill(code-change-protocol|grounded-answers|loop-escape|systematic-debugging|verification-before-completion|cognitive-lenses); external: skillhub_search.\n\
+</emergency>\n\
+</kernel>";
 
 /// Identical tool calls allowed per unchanged workspace state before the third is blocked.
 const LOOP_REPEAT_LIMIT: usize = 2;
@@ -7135,17 +7150,17 @@ async fn capture_stage_artifact(
 
 fn build_stage1_prompt(rt: &ThreeStageRuntime, user_prompt: &str) -> String {
     format!(
-        "[STAGE 1 / 3 — BACKGROUND PRE-ANALYSIS & CHAT MEMORY]\n\
-Your ONLY objective in Stage 1 is fast, structured pre-analysis and writing concise project Memory for this chat.\n\
-STRICT RULES:\n\
-- DO NOT write final output/deliverable files or write anything into `outbox/` during Stage 1.\n\
-- Read relevant batches using `batch_read`, `code_to_md`, or `<agy_exec>` (e.g. Python `zipfile` extraction into `{}` or targeted symbol inspection).\n\
-- Identify exact entrypoints, public classes/functions, shared interfaces, bugs, dependencies, and integration contracts.\n\
-- Save concise verified memory into `{}` (via `<agy_write path=\"{}\">...</agy_write>`) AND call `finish` with your Stage-1 Memory summary (<=4 KB).\n\n\
-## Goal Context (summarized)\n{}\n\n{}",
+        "[STAGE 1 / 3 — PRE_ANALYSIS_AND_MEMORY]\n\
+<stage_contract stage=\"1\" outbox_write=\"FORBIDDEN\">\n\
+OBJ: fast read-only analysis + write concise verified memory (<=4KB) to `{}` via <agy_write path=\"{}\"> then call finish.\n\
+TOOLS: batch_read | code_to_md | <agy_exec>(python zipfile into `{}` or targeted symbol inspection).\n\
+EXTRACT: entrypoints, public symbols/contracts, verified bugs, deps, integration boundaries.\n\
+</stage_contract>\n\
+<goal_context>\n{}\n</goal_context>\n\
+<repo_map>\n{}\n</repo_map>",
+        rt.stage_dir.join("01_memory.md").display(),
+        rt.stage_dir.join("01_memory.md").display(),
         rt.stage_dir.join("work").display(),
-        rt.stage_dir.join("01_memory.md").display(),
-        rt.stage_dir.join("01_memory.md").display(),
         clip_chars(user_prompt, 2_400),
         clip_chars(&rt.repo_map_md, 4_200),
     )
@@ -7153,23 +7168,19 @@ STRICT RULES:\n\
 
 fn build_stage2_prompt(stage_dir: &Path, memory_md: &str, skills_brief: &str) -> String {
     let skills_block = if skills_brief.trim().is_empty() {
-        "- Follow clean modular contracts, edge-case guards, and syntax/functional verification after every edit.".to_string()
+        "- Modular contracts, edge-case guards, syntax+functional verification after every edit.".to_string()
     } else {
         clip_chars(skills_brief, 4_500)
     };
     format!(
-        "[STAGE 2 / 3 — TARGETED SKILLHUB RULES & 3-TO-10 CHUNK INTEGRATION PLAN]\n\
-DO NOT write deliverable code files or touch `outbox/` yet.\n\
-Combine the Stage-1 Verified Memory below with the targeted SkillHub Engineering Rules to produce ONE integrated implementation plan split into **3 to 5 chunks** (or **up to 10 chunks** for large multi-module work).\n\
-CONTRACT-FIRST CHUNKING RULE:\n\
-- In Stage 3 you will FIRST create unified skeleton file(s) with `# <<<AGY_SLOT:slot_id>>>` / `// <<<AGY_SLOT:slot_id>>>` markers (`<agy_write path=\"...\">...</agy_write>`), NEVER isolated/standalone scripts.\n\
-- Then you will fill each slot cleanly in chunks `<5 KB` via `<agy_slot name=\"slot_id\" path=\"...\">...</agy_slot>` or `assemble_slots`.\n\n\
-Output cleanly into `{}` (`<agy_write>`) OR directly call `finish` with your Chunk Plan listing:\n\
-1. Exact target file(s) & preserved public symbols/contracts\n\
-2. Ordered Chunk/Slot IDs (1..N, integrated into unified file(s))\n\
-3. Exact syntax/functional verification commands\n\n\
-## Targeted SkillHub Rules (`.agy_stage/02_skills_brief.md`)\n{}\n\n\
-## Active Stage-1 Memory (`.agy_stage/01_memory.md`)\n{}",
+        "[STAGE 2 / 3 — CHUNK_INTEGRATION_PLAN]\n\
+<stage_contract stage=\"2\" outbox_write=\"FORBIDDEN\">\n\
+OBJ: combine Stage-1 Memory + SkillHub rules into ONE integrated plan (3..5 chunks; up to 10 for large multi-module).\n\
+SLOT_RULE: Stage 3 creates unified skeleton(s) with `# <<<AGY_SLOT:id>>>` / `// <<<AGY_SLOT:id>>>` (<agy_write>) then fills slots (<5KB each via <agy_slot> or assemble_slots). NEVER emit standalone disconnected scripts.\n\
+DELIVER: write plan to `{}` (<agy_write>) OR call finish with: (1) target files & preserved symbols, (2) ordered Slot IDs 1..N, (3) exact syntax/test verify commands.\n\
+</stage_contract>\n\
+<skills_brief>\n{}\n</skills_brief>\n\
+<stage1_memory>\n{}\n</stage1_memory>",
         stage_dir.join("02_plan.md").display(),
         skills_block,
         clip_chars(memory_md, 3_200),

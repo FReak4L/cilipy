@@ -1,11 +1,21 @@
 ---
 trigger: always_on
-description: When to use gortex, graphify and ai-memory
+description: AI-native routing for gortex, graphify and ai-memory MCP servers
 ---
 
-# MCP trio
+<mcp_trio>
+GORTEX (live code index):
+  search(before_read) | relations(callers/usages/deps) | change.impact(before_shared_edit) | change.detect/tests(after) | trace(flows) | analyze(communities)
+  IF unindexed_repo -> gortex track <path>
 
-- **Code structure → gortex** (live index): `search` before reading; `relations` (callers/usages/dependents); `change` `impact` before editing shared symbols, `detect`/`tests` after; `trace` for flows; `analyze` for communities. Unindexed repo → `gortex track <path>`.
-- **Whole-graph → graphify** (`graphify-out/graph.json`; other repo: pass `project_path`): `god_nodes`, `shortest_path`, `get_community`, `query_graph` (depth 2–3), PR tools. Refresh stale graphs via `graphify update <repo>`; if it disagrees with gortex, trust gortex and the file.
-- **Durable knowledge → ai-memory**: at most **one** `memory_search` (limit 5) at session start (for Telegram handoffs pass `tags:["tg-<user_id>"]` ONLY; skip on trivial Q&A). Store only decisions, root causes, preferences and environment facts (`content:{title, summary≤200 chars}`, `type`, `source`, `confidence`, `tags`). Never store secrets or code the graph can re-derive.
-- Cap results at 5–10 and read files only at the lines the graph points to.
+GRAPHIFY (whole-graph: graphify-out/graph.json; other_repo -> project_path):
+  god_nodes | shortest_path | get_community | query_graph(depth=2..3) | PR_tools
+  IF stale|missing -> graphify update <repo>; IF conflict_with_gortex -> trust gortex + disk file
+
+AI_MEMORY (durable cross-session facts):
+  READ: <=1 memory_search(limit=5) at session start; skip on trivial 1-turn Q&A; for Telegram handoffs MUST pass tags:["tg-<uid>"] ONLY.
+  WRITE: decisions|root_causes|preferences|env_facts ONLY; content:{title, summary<=200c}, type, source, confidence, tags.
+  FORBID: secrets, credentials, code derivable from graph.
+
+BUDGET: cap results 5..10; read only exact graph-pointed line ranges.
+</mcp_trio>
