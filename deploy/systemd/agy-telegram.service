@@ -1,0 +1,24 @@
+[Unit]
+Description=Antigravity Telegram Bridge (Rust v4)
+After=network-online.target postgresql.service searxng.service
+Wants=network-online.target postgresql.service searxng.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+WorkingDirectory=/root/agy-stack/app
+EnvironmentFile=/etc/agy-telegram/bot.env
+Environment=RUST_LOG=info STATE_DIR=/var/lib/agy-telegram AGY_WORKSPACE=/root/agy-workspace HOME=/root PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/agy-stack/app/bin/agy-telegram
+Restart=always
+RestartSec=3
+TimeoutStartSec=60
+WatchdogSec=60
+KillMode=mixed
+TimeoutStopSec=20
+SyslogIdentifier=agy-telegram
+
+[Install]
+WantedBy=multi-user.target
