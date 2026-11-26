@@ -1,3 +1,7 @@
+---
+trigger: always_on
+description: Mandatory post-update GitHub sync to FReak4L/cilipy after bot, rule, skill, doc, or MCP changes
+---
 
 # Post-update GitHub sync (`FReak4L/cilipy`)
 
@@ -9,7 +13,7 @@
 3. **Always preserve GitHub Activity & CI checks:**
    - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `ci:`) authored as `Freak 4L <freakxray@proton.me>`.
    - Push to a feature branch and open a Pull Request to `main` (never force-push to `main`).
-   - Wait for CI (`rust-bot`, `python-search-v3`, `node-skills-catalog`, `gitleaks`) before merging; `release-please` handles version bumps, `CHANGELOG.md`, and tagged GitHub Releases.
+   - Wait for CI (`rust-bot`, `python-search-v3`, `node-skills-catalog`, `gitleaks`, `CodeQL & Dependency Audit`) before merging; `release-please` handles version bumps, `CHANGELOG.md`, and tagged GitHub Releases.
 
 ## Standard sync command after any update
 ```bash

@@ -61,8 +61,8 @@ const SKIP_DIRS: &[&str] = &[
 /// and tracking all modified paths for Condenser summaries.
 #[derive(Default)]
 pub struct EditHistory {
-    /// Stack of pre-edit snapshots (`None` = file did not exist prior to edit).
-    stacks: StdMutex<HashMap<PathBuf, Vec<Option<String>>>>,
+    /// Stack of pre-edit raw byte snapshots (`None` = file did not exist prior to edit).
+    stacks: StdMutex<HashMap<PathBuf, Vec<Option<Vec<u8>>>>>,
     /// Ordered set of modified paths touched in this turn.
     modified: StdMutex<BTreeSet<String>>,
 }
@@ -72,12 +72,18 @@ impl EditHistory {
         Self::default()
     }
 
-    /// Snapshot the current file content (or `None` if absent) before a write/patch/insert.
+    /// Snapshot the current file bytes (or `None` if absent) before a write/patch/insert.
     pub fn record_before_write(&self, path: &Path) {
-        let prev = if path.is_file() {
-            std::fs::read_to_string(path).ok()
-        } else {
-            None
+        let prev = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
+                match std::fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => return, // refuse to record a false `None` snapshot that would delete the file on undo
+                }
+            }
+            Ok(_) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return,
         };
         if let Ok(mut map) = self.stacks.lock() {
             let stack = map.entry(path.to_path_buf()).or_default();
@@ -114,20 +120,31 @@ impl EditHistory {
         };
 
         match prev {
-            Some(old_text) => {
-                std::fs::write(path, &old_text)
-                    .map_err(|e| format!("Error restoring {}: {e}", path.display()))?;
+            Some(old_bytes) => {
+                std::fs::write(path, &old_bytes).map_err(|e| {
+                    if let Ok(mut map) = self.stacks.lock() {
+                        map.entry(path.to_path_buf())
+                            .or_default()
+                            .push(Some(old_bytes.clone()));
+                    }
+                    format!("Error restoring {}: {e}", path.display())
+                })?;
+                let line_cnt = String::from_utf8_lossy(&old_bytes).lines().count();
                 Ok(format!(
                     "Undid last edit to {} (restored {} bytes, {} lines).",
                     path.display(),
-                    old_text.len(),
-                    old_text.lines().count()
+                    old_bytes.len(),
+                    line_cnt
                 ))
             }
             None => {
                 if path.exists() {
-                    std::fs::remove_file(path)
-                        .map_err(|e| format!("Error removing newly created {}: {e}", path.display()))?;
+                    std::fs::remove_file(path).map_err(|e| {
+                        if let Ok(mut map) = self.stacks.lock() {
+                            map.entry(path.to_path_buf()).or_default().push(None);
+                        }
+                        format!("Error removing newly created {}: {e}", path.display())
+                    })?;
                 }
                 Ok(format!(
                     "Undid creation of {} (file removed).",

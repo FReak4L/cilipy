@@ -52,3 +52,13 @@ jobs:
           npm --prefix mcp/skills-catalog audit --package-lock-only --audit-level=high
           npm --prefix mcp/skills-catalog/web audit --package-lock-only --audit-level=high
           npm --prefix mcp/ai-memory audit --package-lock-only --audit-level=high
+
+  dependency-review:
+    name: PR Dependency Review Bot
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

@@ -757,7 +757,8 @@ impl BotApiClient {
                                 .as_deref()
                                 .and_then(|h| h.trim().parse::<u64>().ok())
                         })
-                        .unwrap_or(1);
+                        .unwrap_or(1)
+                        .min(86_400);
                     return Err(ApiCallFailure::TelegramError(BridgeError::RateLimited {
                         retry_after_secs,
                         message: desc,
@@ -782,7 +783,8 @@ impl BotApiClient {
                     let retry_after_secs = retry_after_hdr
                         .as_deref()
                         .and_then(|h| h.trim().parse::<u64>().ok())
-                        .unwrap_or(1);
+                        .unwrap_or(1)
+                        .min(86_400);
                     return Err(ApiCallFailure::TelegramError(BridgeError::RateLimited {
                         retry_after_secs,
                         message: "HTTP 429 Too Many Requests".into(),

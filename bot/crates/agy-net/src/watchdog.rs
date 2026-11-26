@@ -409,7 +409,17 @@ impl Watchdog {
             if *shutdown.borrow() {
                 break;
             }
-            self.tick().await;
+            tokio::select! {
+                _ = self.tick() => {}
+                res = shutdown.changed() => {
+                    if res.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+            if *shutdown.borrow() {
+                break;
+            }
             tokio::select! {
                 _ = tokio::time::sleep(self.cfg.interval) => {}
                 res = shutdown.changed() => {

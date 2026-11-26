@@ -478,6 +478,7 @@ async fn call_federation_section(
                 .and_then(Value::as_str)
                 .ok_or_else(|| "server is required".to_string())?;
             let raw = resolve_enabled_server(&env.mcp_config, srv_name)?;
+            let canonical_srv = &raw.name;
             let (cmd, env_map) = server_cmd_and_env(&raw)?;
             let tools = list_stdio_mcp_tools(&cmd, Some(&env_map), 20.0)
                 .await
@@ -488,7 +489,7 @@ async fn call_federation_section(
             for t in tools {
                 let tname = t.get("name").and_then(Value::as_str).unwrap_or("unknown");
                 if pin_enabled {
-                    match env.pins.verify_or_pin(srv_name, tname, &t) {
+                    match env.pins.verify_or_pin(canonical_srv, tname, &t) {
                         PinVerdict::Drifted { .. } => {
                             drifted.push(tname.to_string());
                             continue;
@@ -534,25 +535,28 @@ async fn call_federation_section(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
+            let raw = resolve_enabled_server(&env.mcp_config, srv_name)?;
+            let canonical_srv = &raw.name;
+
             if !principal.allow_write && !is_readonly_mcp_tool(target_tool) {
                 return Err(format!(
-                    "Tool '{srv_name}.{target_tool}' is not read-only and requires write scope"
+                    "Tool '{canonical_srv}.{target_tool}' is not read-only and requires write scope"
                 ));
             }
-            // Check quarantine status in ManifestPinStore
+            // Check quarantine status in ManifestPinStore using the canonical server name
             if env.cfg_store.snapshot().manifest_pinning_enabled {
                 let is_q = env
                     .pins
                     .list_quarantined()
                     .iter()
-                    .any(|(s, p)| s == srv_name && p.tool_name == target_tool);
+                    .any(|(s, p)| s == canonical_srv && p.tool_name == target_tool);
                 if is_q {
                     return Err(format!(
-                        "Tool '{srv_name}.{target_tool}' is QUARANTINED due to schema drift (possible rug-pull). Owner must re-approve in /mcpgw."
+                        "Tool '{canonical_srv}.{target_tool}' is QUARANTINED due to schema drift (possible rug-pull). Owner must re-approve in /mcpgw."
                     ));
                 }
             }
-            call_upstream_mcp(env, srv_name, target_tool, target_args, 35.0).await
+            call_upstream_mcp(env, canonical_srv, target_tool, target_args, 35.0).await
         }
         "fed_manifest_status" => Ok(env.pins.summary()),
         other => Err(format!("unknown federation tool: {other}")),

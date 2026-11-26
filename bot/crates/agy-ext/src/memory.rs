@@ -367,6 +367,7 @@ pub async fn memory_add_with_source(
         DEFAULT_MCP_TIMEOUT_SECS,
     )
     .await?;
+    crate::mcp_client::global_mcp_pool().clear_ro_cache();
 
     if res.is_object() {
         Ok(res)
@@ -460,6 +461,7 @@ pub async fn memory_remove(bin: &str, id: &str) -> Result<String> {
         DEFAULT_MCP_TIMEOUT_SECS,
     )
     .await?;
+    crate::mcp_client::global_mcp_pool().clear_ro_cache();
 
     let short: String = target_id.chars().take(8).collect();
     if let Some(obj) = res.as_object() {

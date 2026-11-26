@@ -7,7 +7,7 @@ use agy_core::acl::{McpDecision, McpRequestStatus};
 use agy_core::tg::{CallbackQuery, InlineKeyboardButton, Message};
 use agy_ext::mcp_client::redact_secrets_in_text;
 use agy_ext::mcp_config::{
-    get_mcp_server, is_sensitive_key, list_mcp_servers, remove_mcp_server,
+    get_mcp_server, is_sensitive_key, list_mcp_servers, mcp_config_epoch, remove_mcp_server,
     replace_mcp_server_json, toggle_mcp_server, update_mcp_server, McpServerUpdate, McpServerView,
     MASKED_SECRET,
 };
@@ -20,11 +20,16 @@ use crate::ctx::BotCtx;
 use crate::i18n::{missing_perm_html, perm_label, t, Tx};
 use crate::jobs::{AwaitingInput, JobOverride, JobRequest};
 
-const MAX_MCP_DISPLAY: usize = 24;
+const MCP_PAGE_SIZE: usize = 16;
 
-fn mcp_view_cache() -> &'static DashMap<i64, Vec<McpServerView>> {
-    static CACHE: OnceLock<DashMap<i64, Vec<McpServerView>>> = OnceLock::new();
+fn mcp_view_cache() -> &'static DashMap<i64, (u64, Vec<McpServerView>)> {
+    static CACHE: OnceLock<DashMap<i64, (u64, Vec<McpServerView>)>> = OnceLock::new();
     CACHE.get_or_init(DashMap::new)
+}
+
+fn mcp_rendered_epoch() -> &'static DashMap<i64, u64> {
+    static RENDERED: OnceLock<DashMap<i64, u64>> = OnceLock::new();
+    RENDERED.get_or_init(DashMap::new)
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -43,18 +48,27 @@ fn load_sorted_servers(ctx: &BotCtx) -> Vec<McpServerView> {
 
 fn refresh_mcp_cache(ctx: &BotCtx, uid: i64) -> Vec<McpServerView> {
     ctx.invalidate_mcp_rows_cache();
+    let epoch = mcp_config_epoch();
     let srvs = load_sorted_servers(ctx);
-    mcp_view_cache().insert(uid, srvs.clone());
+    mcp_view_cache().insert(uid, (epoch, srvs.clone()));
     srvs
 }
 
 fn get_cached_servers(ctx: &BotCtx, uid: i64) -> Vec<McpServerView> {
+    let cur_epoch = mcp_config_epoch();
     if let Some(existing) = mcp_view_cache().get(&uid) {
-        if !existing.is_empty() {
-            return existing.clone();
+        if existing.0 == cur_epoch && !existing.1.is_empty() {
+            return existing.1.clone();
         }
     }
     refresh_mcp_cache(ctx, uid)
+}
+
+fn rendered_epoch_stale(uid: i64) -> bool {
+    let cur_epoch = mcp_config_epoch();
+    mcp_rendered_epoch()
+        .get(&uid)
+        .is_some_and(|e| *e != cur_epoch)
 }
 
 fn redacted_env_lines(srv: &McpServerView) -> Vec<String> {
@@ -197,8 +211,19 @@ pub async fn show_mcp(
     chat_id: i64,
     uid: i64,
 ) {
+    show_mcp_page(ctx, cq, chat_id, uid, 0).await;
+}
+
+pub async fn show_mcp_page(
+    ctx: &Arc<BotCtx>,
+    cq: Option<&CallbackQuery>,
+    chat_id: i64,
+    uid: i64,
+    page: usize,
+) {
     let can_m = ctx.has_perm(uid, "mcp_manage");
     let srvs = refresh_mcp_cache(ctx, uid);
+    mcp_rendered_epoch().insert(uid, mcp_config_epoch());
 
     if srvs.is_empty() {
         let live_rows = ctx.mcp_rows_live(Some(uid)).await;
@@ -209,9 +234,18 @@ pub async fn show_mcp(
         if live_rows.is_empty() {
             md_lines.push("> هیچ سرور MCP در کانفیگ یافت نشد.".to_string());
         } else {
+            let total_live = live_rows.len();
+            let pages = total_live.div_ceil(MCP_PAGE_SIZE).max(1);
+            let p = page.min(pages - 1);
+            let start = p * MCP_PAGE_SIZE;
+            let end = (start + MCP_PAGE_SIZE).min(total_live);
+            if pages > 1 {
+                md_lines.push(format!("> صفحه **{}/{pages}** · {total_live} سرور", p + 1));
+                md_lines.push(String::new());
+            }
             md_lines.push("| سرور | وضعیت |".to_string());
             md_lines.push("|---|---|".to_string());
-            for (name, st) in live_rows.iter().take(MAX_MCP_DISPLAY) {
+            for (name, st) in &live_rows[start..end] {
                 let st_lbl = if st.eq_ignore_ascii_case("enabled") {
                     "✓ فعال"
                 } else {
@@ -221,6 +255,20 @@ pub async fn show_mcp(
             }
         }
         let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+        if live_rows.len() > MCP_PAGE_SIZE {
+            let pages = live_rows.len().div_ceil(MCP_PAGE_SIZE);
+            let p = page.min(pages - 1);
+            let mut nav = Vec::new();
+            if p > 0 {
+                nav.push(ctx.btn("", "◀ قبلی", Some(&format!("mcp:p:{}", p - 1)), None, None));
+            }
+            if p + 1 < pages {
+                nav.push(ctx.btn("", "بعدی ▶", Some(&format!("mcp:p:{}", p + 1)), None, None));
+            }
+            if !nav.is_empty() {
+                rows.push(nav);
+            }
+        }
         if can_m {
             rows.push(vec![ctx.btn(
                 "rocket",
@@ -238,16 +286,26 @@ pub async fn show_mcp(
         return;
     }
 
+    let total = srvs.len();
+    let pages = total.div_ceil(MCP_PAGE_SIZE).max(1);
+    let p = page.min(pages - 1);
+    let start = p * MCP_PAGE_SIZE;
+    let end = (start + MCP_PAGE_SIZE).min(total);
+
     let on_cnt = srvs.iter().filter(|s| s.enabled).count();
     let mut md_lines = vec![
         format!("### {} سرورهای MCP", ctx.premium.md("mcp")),
-        format!("> **{on_cnt}/{}** فعال", srvs.len()),
+        if pages > 1 {
+            format!("> **{on_cnt}/{total}** فعال · صفحه **{}/{pages}**", p + 1)
+        } else {
+            format!("> **{on_cnt}/{total}** فعال")
+        },
         String::new(),
         "| سرور | نوع | وضعیت |".to_string(),
         "|---|---|---|".to_string(),
     ];
 
-    for s in srvs.iter().take(MAX_MCP_DISPLAY) {
+    for s in &srvs[start..end] {
         let st_lbl = if s.enabled {
             "✓ فعال"
         } else {
@@ -266,11 +324,11 @@ pub async fn show_mcp(
     }
 
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-    let srv_btns: Vec<InlineKeyboardButton> = srvs
+    let srv_btns: Vec<InlineKeyboardButton> = srvs[start..end]
         .iter()
-        .take(MAX_MCP_DISPLAY)
         .enumerate()
-        .map(|(idx, s)| {
+        .map(|(offset, s)| {
+            let idx = start + offset;
             let mark = if s.enabled { "✓" } else { "○" };
             ctx.btn(
                 "",
@@ -283,6 +341,18 @@ pub async fn show_mcp(
         .collect();
     for pair in srv_btns.chunks(2) {
         rows.push(pair.to_vec());
+    }
+    if pages > 1 {
+        let mut nav = Vec::new();
+        if p > 0 {
+            nav.push(ctx.btn("", "◀ قبلی", Some(&format!("mcp:p:{}", p - 1)), None, None));
+        }
+        if p + 1 < pages {
+            nav.push(ctx.btn("", "بعدی ▶", Some(&format!("mcp:p:{}", p + 1)), None, None));
+        }
+        if !nav.is_empty() {
+            rows.push(nav);
+        }
     }
     if can_m {
         let mut action_row = vec![ctx.btn(
@@ -332,10 +402,13 @@ pub async fn show_mcp_detail(
         }
     };
     if let Some(mut cached) = mcp_view_cache().get_mut(&uid) {
-        if let Some(slot) = cached.get_mut(idx) {
-            *slot = fresh.clone();
+        if cached.0 == mcp_config_epoch() {
+            if let Some(slot) = cached.1.get_mut(idx) {
+                *slot = fresh.clone();
+            }
         }
     }
+    mcp_rendered_epoch().insert(uid, mcp_config_epoch());
 
     let can_m = ctx.has_perm(uid, "mcp_manage");
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -548,6 +621,19 @@ pub async fn handle_mcp_cb(
     if let Ok(direct_idx) = act.parse::<usize>() {
         ctx.ack(&cq.id, None, false).await;
         show_mcp_detail(ctx, Some(cq), chat_id, uid, direct_idx).await;
+        return true;
+    }
+
+    if act == "p" {
+        ctx.ack(&cq.id, None, false).await;
+        let page = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+        show_mcp_page(ctx, Some(cq), chat_id, uid, page).await;
+        return true;
+    }
+
+    if rendered_epoch_stale(uid) && matches!(act, "v" | "tog" | "rm" | "ecmd" | "earg" | "eurl" | "eenv" | "ejson" | "delok") {
+        ctx.ack(&cq.id, Some("لیست قدیمی است — بروزرسانی شد"), false).await;
+        show_mcp(ctx, Some(cq), chat_id, uid).await;
         return true;
     }
 

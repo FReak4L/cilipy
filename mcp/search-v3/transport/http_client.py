@@ -89,6 +89,27 @@ def is_valid_http_url(url: str) -> bool:
     return bool(host) and "." in host
 
 
+def _parsed_host_matches(host: str | None, expected_host: str) -> bool:
+    clean = (host or "").lower().rstrip(".")
+    return clean == expected_host or clean.endswith(f".{expected_host}")
+
+
+def _is_challenge_redirect_url(raw_url: str) -> bool:
+    """Detect CAPTCHA or Google `/sorry/` redirect URLs using parsed hostname/path."""
+    try:
+        parsed = urlparse(raw_url.strip())
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if _parsed_host_matches(host, "sorry.google.com"):
+        return True
+    path = (parsed.path or "").lower()
+    if "/sp/captcha" in path:
+        return True
+    is_google_or_rel = not host or _parsed_host_matches(host, "google.com")
+    return is_google_or_rel and path.startswith("/sorry")
+
+
 def canonicalize_url(raw_url: str) -> str:
     """Normalize protocol-relative links, reject hostless redirectors, and unwrap DDG/Yahoo."""
     if not raw_url:
@@ -105,7 +126,7 @@ def canonicalize_url(raw_url: str) -> str:
             unwrapped = unquote(uddg_values[0]).strip()
             return unwrapped if is_valid_http_url(unwrapped) else ""
 
-    if "r.search.yahoo.com" in parsed.netloc and "/RU=" in parsed.path:
+    if _parsed_host_matches(parsed.hostname, "r.search.yahoo.com") and "/RU=" in parsed.path:
         try:
             ru_segment = parsed.path.split("/RU=", 1)[1].split("/RK=", 1)[0]
             decoded = unquote(ru_segment).strip()
@@ -141,8 +162,7 @@ def detect_soft_block(status_code: int, final_url: str, body: str) -> str | None
     if status_code in (202, 403, 429, 451):
         return f"HTTP {status_code}"
 
-    url_lower = final_url.lower()
-    if any(token in url_lower for token in ("/sp/captcha", "/sorry/", "sorry.google.com")):
+    if _is_challenge_redirect_url(final_url):
         return f"Challenge redirect ({final_url})"
 
     sample = body[:32768].lower()
@@ -179,8 +199,7 @@ def classify_http_response(
             status_code=status_code,
         )
 
-    url_lower = final_url.lower()
-    if any(token in url_lower for token in ("/sp/captcha", "/sorry/", "sorry.google.com")):
+    if _is_challenge_redirect_url(final_url):
         raise CaptchaTriggeredError(f"Challenge redirect ({final_url})", status_code=status_code)
 
     sample = body[:32768].lower()

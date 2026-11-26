@@ -182,6 +182,29 @@ def is_explicit_no_results_page(body: str) -> bool:
     return any(sig in sample for sig in GOOGLE_NO_RESULTS_SIGNATURES)
 
 
+def _url_host_matches(raw_url: str, expected_host: str) -> bool:
+    """Return True iff `raw_url`'s parsed hostname equals or is a subdomain of `expected_host`."""
+    try:
+        host = (urlparse(raw_url.strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return host == expected_host or host.endswith(f".{expected_host}")
+
+
+def _is_google_sorry_url(raw_url: str) -> bool:
+    """Detect Google `/sorry/` or `sorry.google.com` verification redirects without substring spoofing."""
+    try:
+        parsed = urlparse(raw_url.strip())
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host == "sorry.google.com" or host.endswith(".sorry.google.com"):
+        return True
+    path = (parsed.path or "").lower()
+    is_google_or_rel = not host or host == "google.com" or host.endswith(".google.com")
+    return is_google_or_rel and path.startswith("/sorry")
+
+
 def detect_google_block(
     status_code: int,
     final_url: str,
@@ -203,14 +226,13 @@ def detect_google_block(
             retry_after=retry_after,
         )
 
-    url_lower = final_url.lower()
-    if "sorry.google.com" in url_lower or "/sorry/" in url_lower:
+    if _is_google_sorry_url(final_url):
         raise GoogleChallengeTriggeredError(
             f"Google /sorry/ verification redirect: {final_url}",
             status_code=status_code,
         )
 
-    if "consent.google.com" in url_lower:
+    if _url_host_matches(final_url, "consent.google.com"):
         raise GoogleDOMStructureChangedError(
             f"Google redirected to regional consent wall ({final_url}); check SOCS/CONSENT cookies.",
             status_code=status_code,
@@ -229,13 +251,13 @@ def detect_google_block(
         if not has_organic_serp_dom(body):
             refresh_match = _GOOGLE_META_REFRESH_RE.search(body)
             if refresh_match:
-                target = refresh_match.group(1).lower()
-                if "/sorry/" in target or "sorry.google.com" in target:
+                target = refresh_match.group(1).strip()
+                if _is_google_sorry_url(target):
                     raise GoogleChallengeTriggeredError(
                         f"Google meta-refresh to verification page: {target}",
                         status_code=status_code,
                     )
-                if "enablejs" in target:
+                if "enablejs" in target.lower():
                     raise GoogleDOMStructureChangedError(
                         f"Google JS-interstitial stub ({body_len}B, redirect={target}).",
                         status_code=status_code,
