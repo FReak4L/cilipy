@@ -56,7 +56,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "gray-matter": "^4.0.3",
-    "p-limit": "^6.2.0",
+    "p-limit": "^7.3.3",
     "picomatch": "^4.0.4",
     "tsx": "^4.19.2",
     "typescript": "^7.0.2"
