@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.1.1](https://github.com/FReak4L/cilipy/compare/cilipy-v4.1.0...cilipy-v4.1.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* resolve CodeQL URL alerts, RustSec url advisory, parallel MCP race, and CI audit ([7a1c108](https://github.com/FReak4L/cilipy/commit/7a1c10810a7acf2410386b74ab1cdaa53074ecc1))
+* resolve CodeQL URL alerts, RustSec url advisory, parallel MCP race, and CI audit ([eaaa929](https://github.com/FReak4L/cilipy/commit/eaaa92933142734242c13fc4b1adb5d0de50413a))
+
 ## [4.1.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.0.0...cilipy-v4.1.0) (2026-11-26)
 
 
