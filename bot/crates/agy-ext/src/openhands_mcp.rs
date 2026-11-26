@@ -6,7 +6,7 @@
 //! - Stateful `oh_file_editor` (`view`/`create`/`str_replace`/`insert`/`undo_edit` rollback stack)
 //! - `oh_patch_file` (unique/fuzzy/unified diff + fast differential syntax diagnostics)
 //! - `oh_glob_files`, `oh_find_symbols`, `oh_grep_files`, `oh_git_ops`, `oh_microagents`
-//! - `oh_execute_code` (Python 3 Unix-socket RPC with 22 `agy_tools` & up to 150 calls in 1 turn!)
+//! - `oh_execute_code` (Python 3 Unix-socket RPC with 24 `agy_tools` & up to 150 calls in 1 turn!)
 //! - `oh_pty_start` + `oh_process_manage` (persistent `tmux` PTY sessions across turns)
 //! - `oh_task_tracker` (persistent checklist), `oh_pack_md`, `oh_apply_md`, `oh_verify`, `oh_inspect_image`
 //! - `oh_delegate_agent` & `oh_dev_loop` (cross-engine delegation to `uncensored` OR `grok`)
@@ -267,7 +267,7 @@ pub fn openhands_mcp_tools_schema() -> Value {
         },
         {
             "name": "oh_execute_code",
-            "description": "SPEED MULTIPLIER (CodeAct Python RPC): execute ONE Python 3 script importing `agy_tools` (22 RPC tools: read_file, write_file, patch_file, file_editor, list_dir, glob_files, grep_files, find_symbols, git_ops, run_command, process_manage, verify_project, code_to_md, md_to_code, inspect_image, web_search, fetch_url, memory_search, memory_store, call_mcp_tool, task_tracker) — up to 150 tool calls in ONE turn (300s timeout). Only print() enters model context!",
+            "description": "SPEED MULTIPLIER (CodeAct Python RPC): execute ONE Python 3 script importing `agy_tools` (24 RPC tools: read_file, batch_read, write_file, patch_file, multi_edit, file_editor, list_dir, glob_files, grep_files, find_symbols, git_ops, run_command, process_manage, verify_project, code_to_md, md_to_code, inspect_image, web_search, fetch_url, memory_search, memory_store, call_mcp_tool, task_tracker) — up to 150 tool calls in ONE turn (300s timeout). Only print() enters model context!",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -514,6 +514,15 @@ fn err_text(id: Value, text: String) -> Value {
     })
 }
 
+fn tool_reply(id: Value, text: String) -> Value {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("Error:") || trimmed.starts_with("Error ") {
+        err_text(id, text)
+    } else {
+        ok_text(id, text)
+    }
+}
+
 fn resolve_grok_sticky_proxy(state_dir: &Path) -> std::result::Result<Option<String>, String> {
     let proxies_path = state_dir.join("proxies.json");
     if !proxies_path.exists() {
@@ -541,39 +550,40 @@ async fn dispatch_tool_call(
     match tname {
         "oh_file_editor" => {
             let out = execute_agent_tool_with_state("file_editor", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_patch_file" => {
             let out = execute_agent_tool_with_state("patch_file", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_batch_read" => {
             let out = execute_agent_tool_with_state("batch_read", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_multi_edit" => {
             let out = execute_agent_tool_with_state("multi_edit", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_glob_files" => {
             let out = execute_agent_tool_with_state("glob_files", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_find_symbols" => {
             let out = execute_agent_tool_with_state("find_symbols", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_grep_files" => {
             let out = execute_agent_tool_with_state("grep_files", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_git_ops" => {
             let out = execute_agent_tool_with_state("git_ops", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_execute_code" => {
+            ctx.turn_state.reset_mcp_calls();
             let out = execute_agent_tool_with_state("execute_code", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_pty_start" => {
             let command = targs.get("command").and_then(Value::as_str).unwrap_or("");
@@ -592,31 +602,31 @@ async fn dispatch_tool_call(
                 run_args["sandbox"] = json!(sb);
             }
             let out = execute_agent_tool_with_state("run_command", &run_args, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_process_manage" => {
             let out = execute_agent_tool_with_state("process_manage", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_task_tracker" => {
             let out = execute_agent_tool_with_state("task_tracker", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_pack_md" => {
             let out = execute_agent_tool_with_state("code_to_md", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_apply_md" => {
             let out = execute_agent_tool_with_state("md_to_code", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_verify" => {
             let out = execute_agent_tool_with_state("verify_project", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_inspect_image" => {
             let out = execute_agent_tool_with_state("inspect_image", targs, &cfg, &ctx.turn_state).await;
-            ok_text(id, out)
+            tool_reply(id, out)
         }
         "oh_microagents" => {
             let root = ctx.resolve_path(targs.get("path").and_then(Value::as_str));
@@ -888,11 +898,12 @@ async fn dispatch_tool_call(
 
 /// Standalone stdio JSON-RPC 2.0 MCP server (`agy-telegram --mcp-openhands`).
 pub async fn run_mcp_openhands_server() -> Result<()> {
-    let ctx = OpenHandsMcpContext::from_env();
+    let ctx = Arc::new(OpenHandsMcpContext::from_env());
     let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    let stdout = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     let mut reader = BufReader::new(stdin);
     let mut line = String::new();
+    let mut tasks = tokio::task::JoinSet::new();
 
     loop {
         line.clear();
@@ -907,23 +918,41 @@ pub async fn run_mcp_openhands_server() -> Result<()> {
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(req) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        let Some(response) = handle_mcp_request(&req, &ctx).await else {
-            continue;
+        let req = match serde_json::from_str::<Value>(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                let err_resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": { "code": -32700, "message": format!("Parse error: {e}") }
+                });
+                if let Ok(mut encoded) = serde_json::to_vec(&err_resp) {
+                    encoded.push(b'\n');
+                    let mut out = stdout.lock().await;
+                    let _ = out.write_all(&encoded).await;
+                    let _ = out.flush().await;
+                }
+                continue;
+            }
         };
 
-        let mut encoded = serde_json::to_vec(&response)
-            .map_err(|e| BridgeError::json("serializing mcp-openhands response", e))?;
-        encoded.push(b'\n');
-        stdout
-            .write_all(&encoded)
-            .await
-            .map_err(|e| BridgeError::io("writing mcp-openhands stdout", e))?;
-        let _ = stdout.flush().await;
+        let ctx_c = Arc::clone(&ctx);
+        let out_c = Arc::clone(&stdout);
+        tasks.spawn(async move {
+            let Some(response) = handle_mcp_request(&req, &ctx_c).await else {
+                return;
+            };
+            if let Ok(mut encoded) = serde_json::to_vec(&response) {
+                encoded.push(b'\n');
+                let mut out = out_c.lock().await;
+                let _ = out.write_all(&encoded).await;
+                let _ = out.flush().await;
+            }
+        });
+        while tasks.try_join_next().is_some() {}
     }
 
+    while tasks.join_next().await.is_some() {}
     Ok(())
 }
 

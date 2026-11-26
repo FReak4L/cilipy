@@ -273,14 +273,6 @@ impl Poller {
                 }
             };
 
-            if self.is_stopped() {
-                if let Ok(updates) = fetch_result {
-                    self.metrics.on_poll_ok(updates.len());
-                    self.process_updates(updates, handler).await;
-                }
-                break;
-            }
-
             match fetch_result {
                 Ok(updates) => {
                     if attempt > 0 {
@@ -290,10 +282,13 @@ impl Poller {
                     self.metrics.on_poll_ok(updates.len());
                     self.process_updates(updates, handler.clone()).await;
                 }
+                Err(_) if self.is_stopped() => {
+                    break;
+                }
                 Err(BridgeError::RateLimited {
                     retry_after_secs, ..
                 }) => {
-                    let wait = Duration::from_secs_f64(
+                    let wait = bounded_duration_secs(
                         (retry_after_secs.saturating_add(1)) as f64 * self.cfg.backoff_scale,
                     );
                     warn!(retry_after_secs, "getUpdates rate limited; backing off");
@@ -312,7 +307,7 @@ impl Poller {
                         "getUpdates conflict (webhook set or another instance)"
                     );
                     attempt = attempt.saturating_add(1);
-                    if self.sleep_interruptible(Duration::from_secs_f64(d)).await {
+                    if self.sleep_interruptible(bounded_duration_secs(d)).await {
                         break;
                     }
                 }
@@ -325,7 +320,7 @@ impl Poller {
                         retry_s = format_args!("{d:.1}"),
                         "getUpdates failed; retrying"
                     );
-                    if self.sleep_interruptible(Duration::from_secs_f64(d)).await {
+                    if self.sleep_interruptible(bounded_duration_secs(d)).await {
                         break;
                     }
                 }
@@ -338,7 +333,7 @@ impl Poller {
                         retry_s = format_args!("{d:.1}"),
                         "getUpdates unexpected API error"
                     );
-                    if self.sleep_interruptible(Duration::from_secs_f64(d)).await {
+                    if self.sleep_interruptible(bounded_duration_secs(d)).await {
                         break;
                     }
                 }
@@ -402,6 +397,13 @@ fn truncate_err(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
+}
+
+fn bounded_duration_secs(secs: f64) -> Duration {
+    if !secs.is_finite() || secs <= 0.0 {
+        return Duration::from_secs(1);
+    }
+    Duration::try_from_secs_f64(secs.clamp(0.0, 86_400.0)).unwrap_or(Duration::from_secs(60))
 }
 
 #[cfg(test)]

@@ -408,6 +408,18 @@ pub fn atomic_self_update(
     backup_dir: &Path,
 ) -> Result<PathBuf> {
     let staged_bytes = verify_elf_file(staged_bin, "staged_bin")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(staged_bin) {
+            let mode = meta.permissions().mode();
+            if mode & 0o111 == 0 {
+                let mut perms = meta.permissions();
+                perms.set_mode(mode | 0o755);
+                let _ = std::fs::set_permissions(staged_bin, perms);
+            }
+        }
+    }
     run_preflight_check_cmd(staged_bin)?;
 
     std::fs::create_dir_all(backup_dir)

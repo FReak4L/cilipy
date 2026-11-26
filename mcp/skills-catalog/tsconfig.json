@@ -3,7 +3,6 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["node"],
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
@@ -14,7 +13,8 @@
     "sourceMap": false,
     "allowSyntheticDefaultImports": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": false
+    "verbatimModuleSyntax": false,
+    "types": ["node"]
   },
   "include": ["src/**/*"]
 }

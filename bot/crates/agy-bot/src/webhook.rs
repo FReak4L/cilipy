@@ -286,9 +286,19 @@ impl TransportSupervisor {
         dispatcher: Arc<dyn UpdateDispatcher>,
         busy_fn: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Self {
+        let soft_s = if cfg.wd_soft.is_finite() {
+            cfg.wd_soft.clamp(1.0, 86_400.0)
+        } else {
+            75.0
+        };
+        let hard_s = if cfg.wd_hard.is_finite() {
+            cfg.wd_hard.clamp(soft_s, 86_400.0)
+        } else {
+            300.0
+        };
         let watchdog_cfg = WatchdogConfig {
-            soft_stall: Duration::from_secs_f64(cfg.wd_soft.max(1.0)),
-            hard_stall: Duration::from_secs_f64(cfg.wd_hard.max(1.0)),
+            soft_stall: Duration::try_from_secs_f64(soft_s).unwrap_or(Duration::from_secs(75)),
+            hard_stall: Duration::try_from_secs_f64(hard_s).unwrap_or(Duration::from_secs(300)),
             ..Default::default()
         };
         Self {
@@ -302,7 +312,7 @@ impl TransportSupervisor {
                 .collect(),
             busy_fn,
             watchdog_cfg,
-            webhook_info_interval: Duration::from_secs(60),
+            webhook_info_interval: Duration::from_secs(25),
         }
     }
 
@@ -408,6 +418,7 @@ impl TransportSupervisor {
             warn!(error = %err, "deleteWebhook failed during polling startup (continuing)");
         }
         self.health.set_mode("polling");
+        self.health.poll_ok(0);
         let _ = self.health.write();
 
         let metrics = Arc::new(HealthMetricsAdapter::new(Arc::clone(&self.health)));
@@ -539,7 +550,24 @@ impl TransportSupervisor {
             }
             tokio::select! {
                 _ = tokio::time::sleep(check_interval) => {
-                    match self.client.call_json::<FullWebhookInfo>("getWebhookInfo", &json!({}), None).await {
+                    let empty_params = json!({});
+                    let info_call = tokio::select! {
+                        res = self.client.call_json::<FullWebhookInfo>(
+                            "getWebhookInfo",
+                            &empty_params,
+                            Some(Duration::from_secs(10)),
+                        ) => Some(res),
+                        res = shutdown.changed() => {
+                            if res.is_err() || *shutdown.borrow() {
+                                break;
+                            }
+                            None
+                        }
+                    };
+                    let Some(info_res) = info_call else {
+                        continue;
+                    };
+                    match info_res {
                         Ok(info) => {
                             if let Some(err_msg) = info.has_active_error(loop_started_unix) {
                                 error!(last_error = %err_msg, "webhook delivery error reported by Telegram");

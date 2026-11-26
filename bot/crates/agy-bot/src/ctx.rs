@@ -670,12 +670,8 @@ impl BotCtx {
         let path = self.cfg.state_dir.join("models.json");
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let changed = {
-            let mut g = self.models_mtime.lock().unwrap_or_else(|e| e.into_inner());
-            let c = mtime.is_some() && *g != mtime;
-            if c {
-                *g = mtime;
-            }
-            c
+            let g = self.models_mtime.lock().unwrap_or_else(|e| e.into_inner());
+            mtime.is_some() && *g != mtime
         };
         {
             let guard = match self.models_cache.read() {
