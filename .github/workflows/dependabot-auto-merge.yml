@@ -1,0 +1,40 @@
+name: Dependabot Auto-Triage & Merge Bot
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    name: Triage & Auto-Merge Safe Updates
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Label major bumps for manual review
+        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr edit "$PR_URL" --add-label "dependencies,needs-review" || true
+          gh pr comment "$PR_URL" --body "Dependabot Bot: Major version bump flagged for manual compatibility review before merge." || true
+
+      - name: Approve & enable auto-merge for minor/patch/security updates
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr edit "$PR_URL" --add-label "dependencies,automerge" || true
+          gh pr review --approve "$PR_URL" || true
+          gh pr merge --auto --merge "$PR_URL" || true

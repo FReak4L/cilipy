@@ -1,0 +1,54 @@
+name: Project Manager & Triage Bot
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+  issues:
+    types: [opened]
+  schedule:
+    - cron: "0 4 * * 0"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  label-pr:
+    name: Auto-Label PRs by Component
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+          configuration-path: .github/labeler.yml
+
+  triage-issue:
+    name: Auto-Triage New Issues
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label & post triage checklist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          TITLE: ${{ github.event.issue.title }}
+        run: |
+          if echo "$TITLE" | grep -qiE '^\[?bug|^fix'; then
+            gh issue edit "$ISSUE_URL" --add-label "bug" || true
+          elif echo "$TITLE" | grep -qiE '^\[?feat|enhancement'; then
+            gh issue edit "$ISSUE_URL" --add-label "enhancement" || true
+          fi
+
+  stale-hygiene:
+    name: Stale PR & Issue Hygiene
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-stale: 45
+          days-before-close: 14
+          exempt-issue-labels: "security,pinned,bug"
+          exempt-pr-labels: "automerge,pinned"

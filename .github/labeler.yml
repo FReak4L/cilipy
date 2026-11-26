@@ -1,0 +1,21 @@
+rust-bot:
+  - changed-files:
+      - any-glob-to-any-file: ["bot/**"]
+mcp-search-v3:
+  - changed-files:
+      - any-glob-to-any-file: ["mcp/search-v3/**"]
+mcp-skills-catalog:
+  - changed-files:
+      - any-glob-to-any-file: ["mcp/skills-catalog/**"]
+mcp-ai-memory:
+  - changed-files:
+      - any-glob-to-any-file: ["mcp/ai-memory/**"]
+rules-and-skills:
+  - changed-files:
+      - any-glob-to-any-file: ["rules/**", "skills/**", "docs/**"]
+deploy-and-scripts:
+  - changed-files:
+      - any-glob-to-any-file: ["deploy/**", "scripts/**", "bin-wrappers/**"]
+ci-cd:
+  - changed-files:
+      - any-glob-to-any-file: [".github/**", "release-please*"]

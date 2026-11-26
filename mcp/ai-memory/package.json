@@ -1,15 +1,19 @@
 {
   "name": "mcp-ai-memory-pinned",
   "private": true,
-  "description": "mcp-ai-memory 2.0.1 with dependencies pinned to its Sept-2025 release era (upstream uses 'latest' ranges that broke)",
-  "dependencies": { "mcp-ai-memory": "2.0.1" },
+  "description": "mcp-ai-memory 2.0.1 with security-patched dependency overrides",
+  "dependencies": {
+    "mcp-ai-memory": "2.0.1"
+  },
   "overrides": {
-    "kysely": "0.28.5",
-    "@modelcontextprotocol/sdk": "1.17.5",
-    "zod": "3.25.76",
+    "kysely": "^0.28.20",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7",
     "dotenv": "17.2.2",
     "pg": "8.16.3",
     "pgvector": "0.2.1",
-    "winston": "3.17.0"
+    "winston": "3.17.0",
+    "protobufjs": "^7.6.6",
+    "sharp": "^0.35.5"
   }
 }
