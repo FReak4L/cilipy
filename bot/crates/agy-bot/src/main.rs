@@ -1430,7 +1430,7 @@ async fn handle_message(ctx: &Arc<BotCtx>, msg: &Message) {
             return;
         }
         if Box::pin(handlers_gemini::handle_gemini_awaiting_text(
-            ctx, uid, chat_id, &inp, raw_text,
+            ctx, msg, uid, chat_id, &inp, raw_text,
         ))
         .await
         {

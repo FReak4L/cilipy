@@ -223,6 +223,9 @@ pub struct GeminiAccount {
     /// Sticky egress proxy URL bound exclusively to this account (`http(s)://` or `socks5(h)://`).
     #[serde(default)]
     pub proxy_url: Option<String>,
+    /// Optional managed proxy ID from `$STATE_DIR/proxies.json` (synced with bot's ProxyRegistry).
+    #[serde(default)]
+    pub proxy_id: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -243,6 +246,13 @@ pub struct GeminiAccount {
     pub success_count: u64,
     #[serde(default)]
     pub failure_count: u64,
+    /// Live models discovered during last `/models` health probe.
+    #[serde(default)]
+    pub discovered_models: Vec<String>,
+    #[serde(default)]
+    pub last_probe_epoch: u64,
+    #[serde(default)]
+    pub last_probe_ok: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -267,6 +277,37 @@ impl std::fmt::Debug for GeminiAccount {
 }
 
 impl GeminiAccount {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        kind: GeminiBackendKind,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: sanitize_slug(&id.into()),
+            label: label.into(),
+            email: None,
+            kind,
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            proxy_url: None,
+            proxy_id: None,
+            enabled: true,
+            cooldown_until_epoch: 0,
+            consecutive_failures: 0,
+            last_used_epoch: 0,
+            last_error: None,
+            ewma_latency_ms: 0.0,
+            ewma_error_rate: 0.0,
+            success_count: 0,
+            failure_count: 0,
+            discovered_models: Vec::new(),
+            last_probe_epoch: 0,
+            last_probe_ok: None,
+        }
+    }
+
     pub fn is_cooled_down(&self, now: u64) -> bool {
         self.cooldown_until_epoch > now
     }
@@ -378,9 +419,110 @@ impl GeminiAccountPool {
             .unwrap_or_default()
     }
 
+    /// Thread-safe snapshot load serialized with `POOL_FILE_LOCK`.
+    pub fn load_locked(state_dir: &Path) -> Self {
+        let _guard = POOL_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self::load(state_dir)
+    }
+
+    /// Thread-safe atomic load -> mutate -> save under `POOL_FILE_LOCK` (0o600 file, 0o700 dir).
+    pub fn mutate_locked<T, F: FnOnce(&mut Self) -> T>(state_dir: &Path, f: F) -> std::io::Result<T> {
+        let _guard = POOL_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pool = Self::load(state_dir);
+        let out = f(&mut pool);
+        pool.save(state_dir)?;
+        Ok(out)
+    }
+
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
+        let dir = gemini_state_dir(state_dir);
+        let _ = fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
         let p = gemini_accounts_path(state_dir);
         atomic_write_json(&p, self, true).map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    pub fn get(&self, id: &str) -> Option<&GeminiAccount> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// Find an existing account that already uses the exact same `(base_url, api_key)`.
+    pub fn find_duplicate(&self, base_url: &str, api_key: &str) -> Option<&GeminiAccount> {
+        let norm_base = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let norm_key = api_key.trim();
+        self.accounts.iter().find(|a| {
+            a.base_url.trim().trim_end_matches('/').to_ascii_lowercase() == norm_base
+                && a.api_key.trim() == norm_key
+        })
+    }
+
+    pub fn reset_cooldown(&mut self, id: &str) -> bool {
+        if let Some(acc) = self.accounts.iter_mut().find(|a| a.id == id) {
+            acc.cooldown_until_epoch = 0;
+            acc.consecutive_failures = 0;
+            acc.ewma_error_rate = 0.0;
+            acc.last_error = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_proxy_binding(
+        &mut self,
+        id: &str,
+        proxy_id: Option<String>,
+        proxy_url: Option<String>,
+    ) -> bool {
+        if let Some(acc) = self.accounts.iter_mut().find(|a| a.id == id) {
+            acc.proxy_id = proxy_id.filter(|s| !s.trim().is_empty());
+            acc.proxy_url = proxy_url.filter(|s| !s.trim().is_empty());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rotate_key(&mut self, id: &str, new_key: String) -> bool {
+        if let Some(acc) = self.accounts.iter_mut().find(|a| a.id == id) {
+            acc.api_key = new_key;
+            acc.cooldown_until_epoch = 0;
+            acc.consecutive_failures = 0;
+            acc.last_error = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_email(&mut self, id: &str, email: Option<String>) -> bool {
+        if let Some(acc) = self.accounts.iter_mut().find(|a| a.id == id) {
+            acc.email = email.filter(|s| !s.trim().is_empty());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Collect deduplicated live models discovered across all enabled accounts.
+    pub fn all_discovered_models(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for a in &self.accounts {
+            if !a.enabled {
+                continue;
+            }
+            for m in &a.discovered_models {
+                if seen.insert(m.clone()) {
+                    out.push(m.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn upsert(&mut self, mut acc: GeminiAccount) {
@@ -610,8 +752,298 @@ fn record_pool_outcome(state_dir: &Path, account_id: &str, latency_ms: u64, err:
 
 /// Thread-safe snapshot load of the Gemini account pool.
 fn load_pool_locked(state_dir: &Path) -> GeminiAccountPool {
-    let _guard = POOL_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    GeminiAccountPool::load(state_dir)
+    GeminiAccountPool::load_locked(state_dir)
+}
+
+/// Result of a live `/models` connectivity & authentication probe for one Gemini account.
+#[derive(Debug, Clone)]
+pub struct GeminiProbeReport {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub models: Vec<String>,
+    pub detail: String,
+}
+
+/// Redact an API key or proxy credentials from any diagnostic error string.
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    let mut out = text.to_string();
+    let s = secret.trim();
+    if s.len() >= 6 {
+        out = out.replace(s, "[REDACTED]");
+    }
+    out
+}
+
+/// Live connectivity + auth probe against `{base_url}/models` (respecting sticky proxy).
+pub async fn probe_gemini_account(account: &GeminiAccount) -> GeminiProbeReport {
+    let t0 = std::time::Instant::now();
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+    if let Some(ref p) = account.proxy_url {
+        match reqwest::Proxy::all(p) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(e) => {
+                return GeminiProbeReport {
+                    ok: false,
+                    latency_ms: t0.elapsed().as_millis() as u64,
+                    models: Vec::new(),
+                    detail: format!("Invalid sticky proxy: {e}"),
+                };
+            }
+        }
+    }
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            return GeminiProbeReport {
+                ok: false,
+                latency_ms: t0.elapsed().as_millis() as u64,
+                models: Vec::new(),
+                detail: format!("HTTP client error: {e}"),
+            };
+        }
+    };
+
+    let base = account.base_url.trim_end_matches('/');
+    let url = format!("{base}/models");
+    let mut req = client.get(&url);
+    if !account.api_key.trim().is_empty() && account.api_key.trim() != "local-sidecar" {
+        req = req.bearer_auth(account.api_key.trim());
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let latency_ms = t0.elapsed().as_millis() as u64;
+            if !status.is_success() {
+                let snippet: String = redact_secret(&body, &account.api_key)
+                    .chars()
+                    .take(160)
+                    .collect();
+                return GeminiProbeReport {
+                    ok: false,
+                    latency_ms,
+                    models: Vec::new(),
+                    detail: format!("HTTP {} · {}", status.as_u16(), snippet.trim()),
+                };
+            }
+            let mut models = Vec::new();
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if let Some(arr) = v.get("data").and_then(Value::as_array) {
+                    for item in arr {
+                        if let Some(id) = item.get("id").and_then(Value::as_str) {
+                            let clean = id.strip_prefix("models/").unwrap_or(id).trim();
+                            if !clean.is_empty() && models.len() < 40 {
+                                models.push(clean.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            GeminiProbeReport {
+                ok: true,
+                latency_ms,
+                detail: format!("OK · {} models · {}ms", models.len(), latency_ms),
+                models,
+            }
+        }
+        Err(e) => GeminiProbeReport {
+            ok: false,
+            latency_ms: t0.elapsed().as_millis() as u64,
+            models: Vec::new(),
+            detail: redact_secret(&e.to_string(), &account.api_key),
+        },
+    }
+}
+
+/// Probe an account by ID and atomically persist updated health, EWMA latency, and discovered models.
+pub async fn probe_and_record_account(state_dir: &Path, account_id: &str) -> Option<GeminiProbeReport> {
+    let acc = GeminiAccountPool::load_locked(state_dir).get(account_id).cloned()?;
+    let report = probe_gemini_account(&acc).await;
+    let now = now_epoch();
+    let _ = GeminiAccountPool::mutate_locked(state_dir, |pool| {
+        if let Some(a) = pool.accounts.iter_mut().find(|x| x.id == account_id) {
+            a.last_probe_epoch = now;
+            a.last_probe_ok = Some(report.ok);
+            if report.ok {
+                if !report.models.is_empty() {
+                    a.discovered_models = report.models.clone();
+                }
+                pool.record_success(account_id, now, report.latency_ms);
+            } else {
+                pool.record_failure(account_id, &report.detail, now, report.latency_ms);
+            }
+        }
+    });
+    Some(report)
+}
+
+/// Smart multi-format & batch parser for Gemini account onboarding:
+/// Accepts raw `AIza...` keys, raw `http(s)://...` sidecar URLs, `Label | key [| email | proxy]`,
+/// `Label | base_url | key [| email | proxy]`, and multi-line batches (1 account per line).
+pub fn parse_account_input_lines(
+    raw: &str,
+    hint_kind: Option<GeminiBackendKind>,
+    existing_count: usize,
+) -> Result<Vec<GeminiAccount>, String> {
+    let mut parsed = Vec::new();
+    let mut idx = existing_count;
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        idx += 1;
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        let acc = if parts.len() == 1 {
+            let tok = parts[0];
+            let low = tok.to_ascii_lowercase();
+            if low.starts_with("http://") || low.starts_with("https://") {
+                let norm_url = normalize_openai_base(tok);
+                let kind = hint_kind.unwrap_or_else(|| {
+                    if norm_url.contains(":8084") {
+                        GeminiBackendKind::AiStudioSidecar
+                    } else {
+                        GeminiBackendKind::Web2ApiSidecar
+                    }
+                });
+                let label = format!("sidecar-{idx}");
+                GeminiAccount::new(&label, &label, kind, norm_url, "local-sidecar")
+            } else if tok.starts_with("AIza") || hint_kind == Some(GeminiBackendKind::OfficialFreeKey) {
+                if tok.len() < 12 {
+                    return Err("API key looks too short (expected AIza... key or Label | key).".to_string());
+                }
+                let label = format!("aistudio-{idx}");
+                GeminiAccount::new(
+                    &label,
+                    &label,
+                    GeminiBackendKind::OfficialFreeKey,
+                    OFFICIAL_GEMINI_OPENAI_BASE,
+                    tok,
+                )
+            } else {
+                let kind = hint_kind.unwrap_or(GeminiBackendKind::Web2ApiSidecar);
+                let label = format!("gemini-{idx}");
+                GeminiAccount::new(&label, &label, kind, kind.default_base_url(), tok)
+            }
+        } else {
+            let label = if parts[0].is_empty() {
+                format!("gemini-{idx}")
+            } else {
+                parts[0].to_string()
+            };
+            let second_is_url = {
+                let s = parts[1].to_ascii_lowercase();
+                s.starts_with("http://") || s.starts_with("https://")
+            };
+            if second_is_url {
+                let base_url = normalize_openai_base(parts[1]);
+                let api_key = parts
+                    .get(2)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("local-sidecar")
+                    .to_string();
+                let email = parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let proxy_url = parts.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let kind = hint_kind.unwrap_or_else(|| {
+                    if base_url.contains("generativelanguage.googleapis.com") {
+                        GeminiBackendKind::OfficialFreeKey
+                    } else if base_url.contains(":8084") {
+                        GeminiBackendKind::AiStudioSidecar
+                    } else {
+                        GeminiBackendKind::Web2ApiSidecar
+                    }
+                });
+                let mut a = GeminiAccount::new(&label, &label, kind, base_url, api_key);
+                a.email = email;
+                a.proxy_url = proxy_url;
+                a
+            } else {
+                let api_key = parts[1].to_string();
+                let kind = hint_kind.unwrap_or_else(|| {
+                    if api_key.starts_with("AIza") {
+                        GeminiBackendKind::OfficialFreeKey
+                    } else {
+                        GeminiBackendKind::Web2ApiSidecar
+                    }
+                });
+                let email = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let proxy_url = parts.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                let mut a = GeminiAccount::new(&label, &label, kind, kind.default_base_url(), api_key);
+                a.email = email;
+                a.proxy_url = proxy_url;
+                a
+            }
+        };
+        GeminiAccountPool::validate_account_urls(&acc.base_url, acc.proxy_url.as_deref())?;
+        parsed.push(acc);
+    }
+    if parsed.is_empty() {
+        return Err("No valid account entries found. Paste an AIza... key, sidecar URL, or `Label | Key`.".to_string());
+    }
+    Ok(parsed)
+}
+
+fn normalize_openai_base(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.ends_with("/v1") || trimmed.ends_with("/openai") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
+/// Automatically probe local sidecars (`127.0.0.1:8083`, `127.0.0.1:8084`) and `GEMINI_API_KEY` env,
+/// registering any reachable healthy backend without creating duplicates.
+pub async fn discover_local_gemini_backends(state_dir: &Path) -> Vec<(String, GeminiProbeReport)> {
+    let mut candidates = vec![
+        GeminiAccount::new(
+            "local-web2api",
+            "Local Web2API (8083)",
+            GeminiBackendKind::Web2ApiSidecar,
+            DEFAULT_WEB2API_BASE,
+            "local-sidecar",
+        ),
+        GeminiAccount::new(
+            "local-aistudio",
+            "Local AIStudio2API (8084)",
+            GeminiBackendKind::AiStudioSidecar,
+            DEFAULT_AISTUDIO_SIDECAR_BASE,
+            "local-sidecar",
+        ),
+    ];
+    if let Ok(env_key) = std::env::var("GEMINI_API_KEY") {
+        let k = env_key.trim().to_string();
+        if k.len() >= 12 {
+            candidates.push(GeminiAccount::new(
+                "env-aistudio-key",
+                "Env AI Studio Key",
+                GeminiBackendKind::OfficialFreeKey,
+                OFFICIAL_GEMINI_OPENAI_BASE,
+                k,
+            ));
+        }
+    }
+
+    let mut found = Vec::new();
+    for mut cand in candidates {
+        let rep = probe_gemini_account(&cand).await;
+        if rep.ok {
+            let now = now_epoch();
+            cand.last_probe_epoch = now;
+            cand.last_probe_ok = Some(true);
+            cand.discovered_models = rep.models.clone();
+            cand.ewma_latency_ms = rep.latency_ms.max(1) as f64;
+            let label = cand.label.clone();
+            let _ = GeminiAccountPool::mutate_locked(state_dir, |pool| {
+                if pool.find_duplicate(&cand.base_url, &cand.api_key).is_none() {
+                    pool.upsert(cand);
+                }
+            });
+            found.push((label, rep));
+        }
+    }
+    found
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1327,24 +1759,92 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn make_acc(id: &str, label: &str, kind: GeminiBackendKind, base_url: &str, last_used: u64) -> GeminiAccount {
-        GeminiAccount {
-            id: id.into(),
-            label: label.into(),
-            email: None,
-            kind,
-            base_url: base_url.into(),
-            api_key: "dummy-fixture-val".into(),
-            proxy_url: None,
-            enabled: true,
-            cooldown_until_epoch: 0,
-            consecutive_failures: 0,
-            last_used_epoch: last_used,
-            last_error: None,
-            ewma_latency_ms: 0.0,
-            ewma_error_rate: 0.0,
-            success_count: 0,
-            failure_count: 0,
-        }
+        let mut a = GeminiAccount::new(id, label, kind, base_url, "dummy-fixture-val");
+        a.last_used_epoch = last_used;
+        a
+    }
+
+    #[test]
+    fn smart_account_parser_supports_raw_key_url_piped_and_batch() {
+        let raw = "\
+            # comment line\n\
+            AIzaDummyKeyForUnitTest1234\n\
+            http://127.0.0.1:8083\n\
+            MySidecar | http://127.0.0.1:8084 | my-secret | me@example.com | socks5h://127.0.0.1:1080\n\
+            NamedFree | AIzaAnotherDummyKey5678 | clean@example.com\n\
+        ";
+        let list = parse_account_input_lines(raw, None, 0).unwrap();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0].kind, GeminiBackendKind::OfficialFreeKey);
+        assert_eq!(list[0].base_url, OFFICIAL_GEMINI_OPENAI_BASE);
+        assert_eq!(list[1].kind, GeminiBackendKind::Web2ApiSidecar);
+        assert_eq!(list[1].base_url, "http://127.0.0.1:8083/v1");
+        assert_eq!(list[2].kind, GeminiBackendKind::AiStudioSidecar);
+        assert_eq!(list[2].email.as_deref(), Some("me@example.com"));
+        assert_eq!(list[2].proxy_url.as_deref(), Some("socks5h://127.0.0.1:1080"));
+        assert_eq!(list[3].kind, GeminiBackendKind::OfficialFreeKey);
+        assert_eq!(list[3].email.as_deref(), Some("clean@example.com"));
+    }
+
+    #[tokio::test]
+    async fn mock_http_probe_and_record_account_discovers_models_and_redacts_secrets() {
+        let dir = TempDir::new().unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Request 1: 200 OK with live models
+            if let Ok((mut sock, _)) = l.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = json!({
+                    "data": [
+                        { "id": "models/gemini-2.5-flash" },
+                        { "id": "gemini-4-hydrogen" }
+                    ]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+            // Request 2: 401 echoing secret -> must be redacted
+            if let Ok((mut sock, _)) = l.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = "{\"error\":\"bad key dummy-probe-secret\"}";
+                let resp = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let mut acc = GeminiAccount::new(
+            "probe1",
+            "ProbeOne",
+            GeminiBackendKind::Web2ApiSidecar,
+            format!("http://{addr}/v1"),
+            "dummy-probe-secret",
+        );
+        acc.id = "probe1".into();
+        GeminiAccountPool::mutate_locked(dir.path(), |p| p.upsert(acc)).unwrap();
+
+        let rep1 = probe_and_record_account(dir.path(), "probe1").await.unwrap();
+        assert!(rep1.ok);
+        assert_eq!(rep1.models, vec!["gemini-2.5-flash", "gemini-4-hydrogen"]);
+        let snap1 = GeminiAccountPool::load_locked(dir.path());
+        assert_eq!(snap1.get("probe1").unwrap().last_probe_ok, Some(true));
+        assert_eq!(snap1.all_discovered_models(), vec!["gemini-2.5-flash", "gemini-4-hydrogen"]);
+
+        let rep2 = probe_and_record_account(dir.path(), "probe1").await.unwrap();
+        assert!(!rep2.ok);
+        assert!(!rep2.detail.contains("dummy-probe-secret"));
+        assert!(rep2.detail.contains("[REDACTED]"));
     }
 
     #[test]
