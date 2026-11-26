@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.3.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.2.0...cilipy-v4.3.0) (2026-11-26)
+
+
+### Features
+
+* adopt AI-native XML+pseudocode prompts, CodeAct tool ladder helpers, and conditional cognitive lenses ([56c7dff](https://github.com/FReak4L/cilipy/commit/56c7dff17c852b83395b1e5d734240f1dfa41f96))
+* adopt AI-native XML+pseudocode prompts, CodeAct tool ladder helpers, and conditional cognitive lenses ([90eda55](https://github.com/FReak4L/cilipy/commit/90eda555103c6393a832617fe714700e87fbcdd2))
+
 ## [4.2.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.1.1...cilipy-v4.2.0) (2026-11-26)
 
 
