@@ -18,6 +18,8 @@ jobs:
   build-and-publish:
     name: Build Linux Release & Checksums
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,14 +39,23 @@ jobs:
           tar -czf dist-release/cilipy-rules-skills.tar.gz rules skills docs
           (cd dist-release && sha256sum *.tar.gz > SHA256SUMS.txt)
       - name: Upload assets to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            dist-release/agy-telegram-linux-x86_64.tar.gz
-            dist-release/cilipy-rules-skills.tar.gz
-            dist-release/SHA256SUMS.txt
-          generate_release_notes: false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              dist-release/agy-telegram-linux-x86_64.tar.gz \
+              dist-release/cilipy-rules-skills.tar.gz \
+              dist-release/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG_NAME" \
+              dist-release/agy-telegram-linux-x86_64.tar.gz \
+              dist-release/cilipy-rules-skills.tar.gz \
+              dist-release/SHA256SUMS.txt \
+              --generate-notes
+          fi
 
   notify-telegram:
     name: Optional Telegram Release Notice
