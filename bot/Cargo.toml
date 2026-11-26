@@ -37,7 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 url = "2.5"
 uuid = { version = "1.16", features = ["v4", "fast-rng"] }
-cron = "0.15"
+cron = "0.17"
 libc = "0.2"
 dashmap = "6.1"
 bytes = "1.10"
