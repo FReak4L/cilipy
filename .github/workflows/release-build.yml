@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "cilipy-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -19,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -36,11 +39,12 @@ jobs:
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist-release/agy-telegram-linux-x86_64.tar.gz
             dist-release/cilipy-rules-skills.tar.gz
             dist-release/SHA256SUMS.txt
-          generate_release_notes: true
+          generate_release_notes: false
 
   notify-telegram:
     name: Optional Telegram Release Notice
@@ -53,7 +57,7 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TG_RELEASE_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TG_RELEASE_CHAT_ID }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           if [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ]; then
