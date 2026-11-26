@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-bot:
+    name: Rust Bot & Gateway Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bot
+      - name: Run cargo test
+        run: cargo test --manifest-path bot/Cargo.toml
+
+  python-search-v3:
+    name: Search v3 Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install search-v3 and pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./mcp/search-v3[dev]"
+      - name: Run pytest
+        run: pytest mcp/search-v3/tests -q
+
+  node-skills-catalog:
+    name: Skills Catalog MCP Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp/skills-catalog/package-lock.json
+      - name: Install & Build
+        working-directory: mcp/skills-catalog
+        run: |
+          npm ci
+          npm run build

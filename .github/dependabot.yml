@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/bot"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/mcp/search-v3"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/mcp/skills-catalog"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
