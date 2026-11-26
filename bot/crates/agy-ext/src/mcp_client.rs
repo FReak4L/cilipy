@@ -704,7 +704,11 @@ pub async fn list_stdio_mcp_tools<S: AsRef<str>>(
         .stderr
         .take()
         .map(|stderr| tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_buf))));
-    let timeout_dur = Duration::from_secs_f64(timeout_secs.clamp(2.0, 45.0));
+    let timeout_dur = Duration::from_secs_f64(if timeout_secs.is_finite() {
+        timeout_secs.clamp(2.0, 45.0)
+    } else {
+        15.0
+    });
     let mut stdout_reader = BufReader::new(stdout);
 
     let res: Result<Vec<Value>> = match tokio::time::timeout(timeout_dur, async {
@@ -1094,6 +1098,7 @@ pub struct McpClientPool {
     entries: AsyncMutex<HashMap<McpPoolKey, Arc<AsyncMutex<Option<PooledMcpConn>>>>>,
     ro_cache_ttl_secs: std::sync::atomic::AtomicU64,
     ro_cache: std::sync::Mutex<RoCache>,
+    seen_config_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Default for McpClientPool {
@@ -1108,6 +1113,28 @@ impl McpClientPool {
             entries: AsyncMutex::new(HashMap::new()),
             ro_cache_ttl_secs: std::sync::atomic::AtomicU64::new(DEFAULT_MCP_RO_CACHE_TTL_SECS),
             ro_cache: std::sync::Mutex::new(RoCache::default()),
+            seen_config_epoch: std::sync::atomic::AtomicU64::new(
+                crate::mcp_config::mcp_config_epoch(),
+            ),
+        }
+    }
+
+    fn ro_cache_epoch_stale(&self, cur_epoch: u64) -> bool {
+        let prev = self
+            .seen_config_epoch
+            .swap(cur_epoch, std::sync::atomic::Ordering::SeqCst);
+        if prev != cur_epoch {
+            self.clear_ro_cache();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all cached read-only MCP responses (e.g. after out-of-band mutations).
+    pub fn clear_ro_cache(&self) {
+        if let Ok(mut c) = self.ro_cache.lock() {
+            c.map.clear();
         }
     }
 
@@ -1246,7 +1273,7 @@ impl McpClientPool {
 
         let cmd_owned = key.0.clone();
 
-        // Retrieve or create per-server slot
+        let cur_epoch = crate::mcp_config::mcp_config_epoch();
         let slot = {
             let mut map = self.entries.lock().await;
             Arc::clone(
@@ -1260,9 +1287,13 @@ impl McpClientPool {
 
         let mut guard = slot.lock().await;
 
-        // Evict stale or dead connection before attempting call
+        // Evict stale or dead connection (or one spawned before an mcp_config mutation)
         let need_evict = match guard.as_mut() {
-            Some(conn) => conn.last_used.elapsed() > MCP_POOL_IDLE_TTL || !conn.is_alive(),
+            Some(conn) => {
+                conn.last_used.elapsed() > MCP_POOL_IDLE_TTL
+                    || !conn.is_alive()
+                    || self.ro_cache_epoch_stale(cur_epoch)
+            }
             None => false,
         };
         if need_evict {
@@ -1272,20 +1303,19 @@ impl McpClientPool {
         }
 
         let mut was_warm = guard.is_some();
-        if guard.is_none() {
-            let conn =
-                PooledMcpConn::spawn_and_init(&cmd_owned, env_overrides, init_timeout).await?;
-            *guard = Some(conn);
-        }
+        let mut conn = match guard.take() {
+            Some(c) => c,
+            None => PooledMcpConn::spawn_and_init(&cmd_owned, env_overrides, init_timeout).await?,
+        };
 
-        let first_res = guard
-            .as_mut()
-            .expect("pooled conn initialized")
+        // Hold `conn` outside `guard` across the await so dropping a cancelled future
+        // drops `conn` (killing the child) instead of leaving a desynced stream in the pool.
+        let first_res = conn
             .call_tool(tool_name, arguments.clone(), timeout_dur)
             .await;
 
-        let final_res = match first_res {
-            Ok(val) => Ok(val),
+        let (final_res, maybe_reusable) = match first_res {
+            Ok(val) => (Ok(val), Some(conn)),
             Err(err) => {
                 let err_msg = err.to_string();
                 let transport_broken = err_msg.contains("closed stdout unexpectedly")
@@ -1295,36 +1325,40 @@ impl McpClientPool {
                     || err_msg.contains("writing MCP JSON-RPC");
 
                 if transport_broken {
-                    if let Some(dead) = guard.take() {
-                        dead.shutdown().await;
-                    }
+                    conn.shutdown().await;
                     // Retry once transparently if we hit a dead warm connection (not a timeout)
                     if was_warm && !err_msg.contains("timed out") {
                         was_warm = false;
                         let _ = was_warm;
-                        let fresh =
+                        let mut fresh =
                             PooledMcpConn::spawn_and_init(&cmd_owned, env_overrides, init_timeout)
                                 .await?;
-                        *guard = Some(fresh);
-                        let retry_res = guard
-                            .as_mut()
-                            .expect("fresh pooled conn")
+                        let retry_res = fresh
                             .call_tool(tool_name, arguments, timeout_dur)
                             .await;
-                        if retry_res.is_err() {
-                            if let Some(dead2) = guard.take() {
-                                dead2.shutdown().await;
+                        match retry_res {
+                            Ok(val) => (Ok(val), Some(fresh)),
+                            Err(retry_err) => {
+                                fresh.shutdown().await;
+                                (Err(retry_err), None)
                             }
                         }
-                        retry_res
                     } else {
-                        Err(err)
+                        (Err(err), None)
                     }
                 } else {
-                    Err(err)
+                    (Err(err), Some(conn))
                 }
             }
         };
+
+        if let Some(reusable) = maybe_reusable {
+            if crate::mcp_config::mcp_config_epoch() == cur_epoch {
+                *guard = Some(reusable);
+            } else {
+                reusable.shutdown().await;
+            }
+        }
 
         if let (Ok(ref val), Some(ck)) = (&final_res, cache_key) {
             self.ro_cache_put(ck, val.clone(), cache_ttl);

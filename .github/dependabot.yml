@@ -7,6 +7,10 @@ updates:
     ignore:
       - dependency-name: "sha2"
         versions: [">= 0.11.0"]
+      - dependency-name: "hmac"
+        versions: [">= 0.13.0"]
+      - dependency-name: "rand"
+        versions: [">= 0.9.0"]
   - package-ecosystem: "pip"
     directory: "/mcp/search-v3"
     schedule:

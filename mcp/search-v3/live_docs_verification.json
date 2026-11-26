@@ -1,0 +1,316 @@
+{
+  "total_results": 22,
+  "unique_domains": 2,
+  "elapsed_seconds": 155.905,
+  "cache_hits": 0,
+  "relaxed_queries": 0,
+  "ast_dropped_results": 59,
+  "dedup_stats": {
+    "input_count": 22,
+    "kept_count": 22,
+    "dropped_url_exact": 0,
+    "dropped_simhash": 0,
+    "dropped_jaccard": 0
+  },
+  "results": [
+    {
+      "rank": 1,
+      "title": "Hosted Fields - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/start/hosted-fields",
+      "snippet": "Data collected using Hosted Fields is sent directly from your client to Braintree, so your customers' raw payment information never touches your server. Braintree associates that data with a secure, one-time-use string called a payment method nonce, which is used instead.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.446712+00:00"
+    },
+    {
+      "rank": 2,
+      "title": "Hosted Fields - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/reference/client-reference/javascript/v2/hosted-fields",
+      "snippet": "You can subscribe to events using the onFieldEvent callback. This allows you to hook into focus, blur, and fieldStateChange. The eventobject will return the following:",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.447645+00:00"
+    },
+    {
+      "rank": 3,
+      "title": "Examples - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/hosted-fields/examples/javascript/v3",
+      "snippet": "We created these examples to show a few of the many possibilities of styling Hosted Fields. We recommend using your own CSS and JS to style your integration and blend the fields into your UI.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.448417+00:00"
+    },
+    {
+      "rank": 4,
+      "title": "Hosted Fields Tutorial - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/start/tutorial-hosted-fields-node",
+      "snippet": "The Braintree sandbox only accepts specific test values. To create a successful transaction in your app, be sure to use the card information below for this test.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.449174+00:00"
+    },
+    {
+      "rank": 5,
+      "title": "Setup and Integration - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/hosted-fields/setup-and-integration/javascript/v3",
+      "snippet": "In this example, when the customer submits the form, Hosted Fields will securely collect and attempt to tokenize the card details. If tokenization succeeds, your callback will receive a nonce. Send this nonce to your server, which you can use to make a transaction.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.449871+00:00"
+    },
+    {
+      "rank": 6,
+      "title": "Setup and Integration - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/hosted-fields/setup-and-integration/javascript/v4/",
+      "snippet": "Use Hosted Fields to build secure, customizable card input fields for your checkout form, so you can collect and tokenize card details without your server directly handling raw card data.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.450638+00:00"
+    },
+    {
+      "rank": 7,
+      "title": "Setup and Integration - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/hosted-fields/setup-and-integration/javascript/v2/",
+      "snippet": "To start using Hosted Fields, you need to create a basic HTML checkout form. You will need to define <div> containers in place of the < input > elements that would normally comprise your credit card input fields (card number, expiration date, and CVV).",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:developer.paypal.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:27:14.451095+00:00"
+    },
+    {
+      "rank": 8,
+      "title": "Applying 3DS to Transactions and Verifications - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/3d-secure/applying-3ds-to-transactions-and-verifications/ruby",
+      "snippet": "If you use Braintree's recurring billing, follow the steps below to apply 3D Secure to subscriptions. Generate a payment method nonce out of a vaulted payment method token.",
+      "engine": "searxng:yahoo",
+      "query": "site:developer.paypal.com braintree 3ds",
+      "timestamp": "2026-11-23T12:28:12.388246+00:00"
+    },
+    {
+      "rank": 9,
+      "title": "Overview - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/3d-secure/overview",
+      "snippet": "By integrating 3DS, payment processors and merchants can comply with these regulatory requirements, ensuring that transactions meet the necessary authentication standards to protect consumer data and reduce fraudulent activity.",
+      "engine": "searxng:yahoo",
+      "query": "site:developer.paypal.com braintree 3ds",
+      "timestamp": "2026-11-23T12:28:12.388346+00:00"
+    },
+    {
+      "rank": 10,
+      "title": "Step by Step Integration - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/3d-secure/step-by-step-integration/javascript/v3",
+      "snippet": "To use 3DS, you will need to create an object with relevant customer and transaction data in order to minimize the need for issuing banks to present authentication challenges to customers.",
+      "engine": "searxng:yahoo",
+      "query": "site:developer.paypal.com braintree 3ds",
+      "timestamp": "2026-11-23T12:28:12.388462+00:00"
+    },
+    {
+      "rank": 11,
+      "title": "Testing - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/3d-secure/testing/ruby",
+      "snippet": "The Braintree sandbox allows end-to-end testing for each of the card brands supported in our 3DS integration. If you want to test in the production environment, see our guidelines on Testing in Production.",
+      "engine": "searxng:yahoo",
+      "query": "site:developer.paypal.com braintree 3ds",
+      "timestamp": "2026-11-23T12:28:12.388565+00:00"
+    },
+    {
+      "rank": 12,
+      "title": "Rules Manager - PayPal Developer",
+      "url": "https://developer.paypal.com/braintree/docs/guides/3d-secure/rules-manager/javascript/v3",
+      "snippet": "With 3D Secure Rules Manager, merchants can create business specific rules for when and how 3DS is invoked directly from the Braintree Control Panel. 3D Secure Rules Manager gives merchants the flexibility to customize when they want to skip or apply 3D Secure and apply business-specific rules.",
+      "engine": "searxng:yahoo",
+      "query": "site:developer.paypal.com braintree 3ds",
+      "timestamp": "2026-11-23T12:28:12.388618+00:00"
+    },
+    {
+      "rank": 13,
+      "title": "iframe - Braintree Hosted Fields Example - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/30337525/braintree-hosted-fields-example",
+      "snippet": "May 20, 2015 · Basically, you have to set up Braintree on the server, create a client token, and then pass that client token to braintree.setup in the JavaScript. The bulk of the Hosted Fields work happens in the \"new transaction\" view.",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.937566+00:00"
+    },
+    {
+      "rank": 14,
+      "title": "Braintree Hosted Fields Integration - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/35804826/braintree-hosted-fields-integration",
+      "snippet": "I am trying to setup Braintree hosted fields on my registration form. But the fields have massive gaps between them and it just doesn't look right. I've tried using the braintree documentation and ...",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.937694+00:00"
+    },
+    {
+      "rank": 15,
+      "title": "javascript - Using custom fields for braintree's hosted ...",
+      "url": "https://stackoverflow.com/questions/42893898/using-custom-fields-for-braintrees-hosted-fields-drop-in",
+      "snippet": "Mar 20, 2017 · Custom Fields, though, can be included in the form, but you'll want to make them simply HTML Input elements, as opposed to div elements, that will be returned to your server alongside the nonce.",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.937826+00:00"
+    },
+    {
+      "rank": 16,
+      "title": "braintree hosted fields integration in reactjs - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/45027641/braintree-hosted-fields-integration-in-reactjs",
+      "snippet": "Jul 24, 2017 · guys, I'm trying to integrate brainTree in reactJs via hosted fields. Now I was able to integrate it in my project and also get it working to and was able to make a payment.",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.937882+00:00"
+    },
+    {
+      "rank": 17,
+      "title": "html - CSS for Braintree Hosted Fields - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/44573248/css-for-braintree-hosted-fields",
+      "snippet": "You need to adjust the height of the divs containing your hosted fields. You're able to accomplish this by adding a height property in your CSS like so:",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.937974+00:00"
+    },
+    {
+      "rank": 18,
+      "title": "How to get hosted fields value in braintree - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/57734328/how-to-get-hosted-fields-value-in-braintree",
+      "snippet": "Aug 31, 2019 · The nature of Hosted Fields is to prevent you from needing to interact with the credit card number itself. The closest you can get to finding details about the credit card is in the tokenizePayload returned from a successful tokenization call.",
+      "engine": "searxng:yahoo",
+      "query": "site:stackoverflow.com braintree hosted-fields",
+      "timestamp": "2026-11-23T12:28:24.938023+00:00"
+    },
+    {
+      "rank": 19,
+      "title": "How to make a braintree subscription with dropin UI and 3DS2?",
+      "url": "https://stackoverflow.com/questions/69809635/how-to-make-a-braintree-subscription-with-dropin-ui-and-3ds2",
+      "snippet": "Nov 2, 2021 · You need to switch to Hosted Fields, not Drop-In. This is because you need to do the following workflow, which Drop-In doesn't support: Generate a payment method nonce out of a vaulted payment method token (server-side) Verify that nonce using 3D Secure in your client.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:stackoverflow.com braintree dropin",
+      "timestamp": "2026-11-23T12:28:26.233572+00:00"
+    },
+    {
+      "rank": 20,
+      "title": "vue.js - Braintree DropIn data collection - Stack Overflow",
+      "url": "https://stackoverflow.com/questions/69376627/braintree-dropin-data-collection",
+      "snippet": "Sep 29, 2021 · Can somebody tell me plese how to collect data in Braintree DropIn implementation? The documentation says ... I dont understand how to call braintree.dataCollector. I have an instance of Briantree but there is no property dataCollector.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:stackoverflow.com braintree dropin",
+      "timestamp": "2026-11-23T12:28:26.234471+00:00"
+    },
+    {
+      "rank": 21,
+      "title": "Typings for braintree.dropin v3 typings for angular - Stack ...",
+      "url": "https://stackoverflow.com/questions/44490878/typings-for-braintree-dropin-v3-typings-for-angular",
+      "snippet": "Jun 12, 2017 · Since this question is about braintree drop in UI, here is my code combined with Typescript and angular 2. Javascript treats this differently than Typescript, so you shouldn't use function keyword inside Typescript.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:stackoverflow.com braintree dropin",
+      "timestamp": "2026-11-23T12:28:26.235352+00:00"
+    },
+    {
+      "rank": 22,
+      "title": "Rails Braintree - To override braintree-dropin.css - Stack ...",
+      "url": "https://stackoverflow.com/questions/33865039/rails-braintree-to-override-braintree-dropin-css",
+      "snippet": "Nov 24, 2015 · Braintree's Drop-In form is externally hosted and loaded into your page using an iFrame. Because the form is hosted elsewhere, the only way you'd be able to change the appearance is if Braintree created javascript hooks into the CSS, as they do for their Hosted Fields form styling.",
+      "engine": "curl_cffi:yahoo_direct",
+      "query": "site:stackoverflow.com braintree dropin",
+      "timestamp": "2026-11-23T12:28:26.236079+00:00"
+    }
+  ],
+  "top_domains": [
+    {
+      "domain": "paypal.com",
+      "count": 12,
+      "engines": [
+        "curl_cffi:yahoo_direct",
+        "searxng:yahoo"
+      ]
+    },
+    {
+      "domain": "stackoverflow.com",
+      "count": 10,
+      "engines": [
+        "curl_cffi:yahoo_direct",
+        "searxng:yahoo"
+      ]
+    }
+  ],
+  "crawl_results": [],
+  "engine_metrics": [
+    {
+      "engine": "searxng",
+      "priority_tier": 1,
+      "requests": 6,
+      "successes": 2,
+      "failures": 4,
+      "empty_yields": 4,
+      "bot_gates": 0,
+      "rate_limits": 0,
+      "http1_fallbacks": 0,
+      "cache_hits": 0,
+      "total_results_yielded": 11,
+      "total_latency_ms": 9547.55573294824,
+      "parked": false,
+      "bandit_alpha": 3.0,
+      "bandit_beta": 5.0,
+      "avg_latency_ms": 1591.26,
+      "reliability_score": 0.333,
+      "thompson_posterior_mean": 0.375
+    },
+    {
+      "engine": "ddg_html",
+      "priority_tier": 2,
+      "requests": 5,
+      "successes": 0,
+      "failures": 5,
+      "empty_yields": 1,
+      "bot_gates": 0,
+      "rate_limits": 4,
+      "http1_fallbacks": 0,
+      "cache_hits": 0,
+      "total_results_yielded": 0,
+      "total_latency_ms": 117943.3867619955,
+      "parked": true,
+      "bandit_alpha": 1.0,
+      "bandit_beta": 10.0,
+      "avg_latency_ms": 23588.68,
+      "reliability_score": 0.0,
+      "thompson_posterior_mean": 0.0909
+    },
+    {
+      "engine": "yahoo_direct",
+      "priority_tier": 3,
+      "requests": 6,
+      "successes": 2,
+      "failures": 4,
+      "empty_yields": 4,
+      "bot_gates": 0,
+      "rate_limits": 0,
+      "http1_fallbacks": 0,
+      "cache_hits": 0,
+      "total_results_yielded": 11,
+      "total_latency_ms": 10323.408090916928,
+      "parked": false,
+      "bandit_alpha": 3.0,
+      "bandit_beta": 5.0,
+      "avg_latency_ms": 1720.57,
+      "reliability_score": 0.333,
+      "thompson_posterior_mean": 0.375
+    },
+    {
+      "engine": "ddg_lite",
+      "priority_tier": 4,
+      "requests": 4,
+      "successes": 0,
+      "failures": 4,
+      "empty_yields": 0,
+      "bot_gates": 0,
+      "rate_limits": 4,
+      "http1_fallbacks": 0,
+      "cache_hits": 0,
+      "total_results_yielded": 0,
+      "total_latency_ms": 168512.87757389946,
+      "parked": true,
+      "bandit_alpha": 1.0,
+      "bandit_beta": 9.0,
+      "avg_latency_ms": 42128.22,
+      "reliability_score": 0.0,
+      "thompson_posterior_mean": 0.1
+    }
+  ]
+}

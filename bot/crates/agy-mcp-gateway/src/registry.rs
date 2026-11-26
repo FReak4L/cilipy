@@ -50,7 +50,7 @@ pub fn smart_hub_meta_tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query or task intent (e.g. 'edit file', 'web search dork', 'switch grok model', 'compact tokens')"},
-                    "section": {"type": "string", "description": "Optional section filter: openhands|search|skillhub|memory|codeintel|models|sessions|optimizer|federation"},
+                    "section": {"type": "string", "description": "Optional section filter: openhands|search|skillhub|memory|codeintel|models|sessions|optimizer|federation|browser"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10}
                 },
                 "required": ["query"]
@@ -89,7 +89,7 @@ pub fn smart_hub_meta_tools() -> Vec<Value> {
         }),
         json!({
             "name": "hub_list_sections",
-            "description": "List all 9 modular AGY MCP sections, their dedicated direct URLs (/mcp/s/<section>), tool counts, and whether your token has access.",
+            "description": "List all 10 modular AGY MCP sections, their dedicated direct URLs (/mcp/s/<section>), tool counts, and whether your token has access.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": make_annotations(true, false, true, false)
         }),

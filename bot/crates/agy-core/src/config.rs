@@ -564,7 +564,12 @@ impl Config {
         if self.bot_token.trim().is_empty() {
             return Err(BridgeError::Config("BOT_TOKEN must be non-empty".into()));
         }
-        if self.wd_soft <= 0.0 || self.wd_hard < self.wd_soft {
+        if !self.wd_soft.is_finite()
+            || !self.wd_hard.is_finite()
+            || self.wd_soft <= 0.0
+            || self.wd_hard < self.wd_soft
+            || self.wd_hard > 86_400.0
+        {
             return Err(BridgeError::Config(format!(
                 "invalid watchdog thresholds: WD_SOFT={} WD_HARD={}",
                 self.wd_soft, self.wd_hard
@@ -573,13 +578,34 @@ impl Config {
         if self.poll_timeout == 0 {
             return Err(BridgeError::Config("POLL_TIMEOUT must be > 0".into()));
         }
+        if (self.poll_timeout as f64) >= self.wd_soft {
+            return Err(BridgeError::Config(format!(
+                "POLL_TIMEOUT ({}) must be strictly less than WD_SOFT ({})",
+                self.poll_timeout, self.wd_soft
+            )));
+        }
         if self.sync_interval_s == 0 {
             return Err(BridgeError::Config("SYNC_INTERVAL_S must be > 0".into()));
         }
-        if matches!(self.tg_transport, TransportMode::Webhook) && self.webhook_url.is_none() {
-            return Err(BridgeError::Config(
-                "WEBHOOK_URL must be set when TG_TRANSPORT=webhook".into(),
-            ));
+        if matches!(self.tg_transport, TransportMode::Webhook) {
+            let url_ok = self
+                .webhook_url
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+            let sec_ok = self
+                .webhook_secret
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+            if !url_ok {
+                return Err(BridgeError::Config(
+                    "WEBHOOK_URL must be set when TG_TRANSPORT=webhook".into(),
+                ));
+            }
+            if !sec_ok {
+                return Err(BridgeError::Config(
+                    "WEBHOOK_SECRET must be set when TG_TRANSPORT=webhook".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -877,6 +903,8 @@ mod tests {
         cfg.tg_transport = TransportMode::Webhook;
         assert!(matches!(cfg.validate(), Err(BridgeError::Config(_))));
         cfg.webhook_url = Some("https://example.org/hook".into());
+        assert!(matches!(cfg.validate(), Err(BridgeError::Config(_))));
+        cfg.webhook_secret = Some("test-webhook-secret".into());
         cfg.validate().unwrap();
 
         cfg.wd_soft = 400.0;

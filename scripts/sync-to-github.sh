@@ -21,6 +21,7 @@ git pull --ff-only origin main
 
 echo "[1/5] Syncing source, rules, skills, docs, MCPs, and utility tools into ${REPO_DIR}..."
 rsync -a --delete --exclude='target/' --exclude='.git/' --exclude='*.bak' \
+  --exclude='/Cargo.toml' --exclude='/Cargo.lock' \
   "${STACK_ROOT}/src/ch-base/" "${REPO_DIR}/bot/"
 rsync -a --delete --exclude='*.bak' \
   "${STACK_ROOT}/config/gemini/rules/" "${REPO_DIR}/rules/"
@@ -35,9 +36,11 @@ rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' --exclude='.git/' -
   --exclude='workspace/configs/' --exclude='workspace/exports/' \
   "${STACK_ROOT}/mcp/search-v3/v3/" "${REPO_DIR}/mcp/search-v3/"
 rsync -a --delete --exclude='node_modules/' --exclude='dist/' --exclude='data/' --exclude='.git/' \
+  --exclude='/package.json' --exclude='/package-lock.json' \
+  --exclude='/web/package.json' --exclude='/web/package-lock.json' \
   "${STACK_ROOT}/mcp/skills-catalog/" "${REPO_DIR}/mcp/skills-catalog/"
 mkdir -p "${REPO_DIR}/mcp/ai-memory" "${REPO_DIR}/scripts/tools"
-for f in package.json package-lock.json stdout-guard.mjs; do
+for f in stdout-guard.mjs; do
   [ -f "${STACK_ROOT}/mcp/ai-memory/${f}" ] && cp "${STACK_ROOT}/mcp/ai-memory/${f}" "${REPO_DIR}/mcp/ai-memory/${f}"
 done
 [ -f "${STACK_ROOT}/config/mcp/agent-browser.json" ] && cp "${STACK_ROOT}/config/mcp/agent-browser.json" "${REPO_DIR}/deploy/agent-browser.json"

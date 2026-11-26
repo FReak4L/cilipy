@@ -149,15 +149,14 @@ class TestStrictDorkPreservation(unittest.TestCase):
                 compile_boolean_query(bad)
 
     def test_all_queries_in_source_txt_compile_deterministically(self) -> None:
-        """Every single non-comment query in the benchmark corpus must parse cleanly."""
-        local_source = Path("/root/ntest/pack/source.txt")
-        bundled_source = Path(__file__).resolve().parent / "sample_queries.txt"
+        """Every single non-comment query in `/root/ntest/pack/source.txt` must parse cleanly."""
+        source_path = Path("/root/ntest/pack/source.txt")
         try:
-            source_path = local_source if local_source.is_file() else bundled_source
-        except PermissionError:
-            source_path = bundled_source
-        if not source_path.is_file():
-            self.skipTest("sample_queries.txt fixture not present")
+            has_source = source_path.is_file()
+        except OSError:
+            has_source = False
+        if not has_source:
+            self.skipTest("source.txt fixture not present or inaccessible")
 
         in_block = False
         parsed_count = 0
