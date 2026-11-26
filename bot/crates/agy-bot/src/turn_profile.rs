@@ -49,6 +49,43 @@ const NON_LITE_CUES: &[&str] = &[
     "analyze", "inspect", "explain this code", "read ",
 ];
 
+fn is_word_boundary_char(c: char) -> bool {
+    !c.is_alphanumeric() && c != '_' && c != '-' && c != '\u{200c}'
+}
+
+fn has_cue(low: &str, raw_cue: &str) -> bool {
+    let cue = raw_cue.trim();
+    if cue.is_empty() {
+        return false;
+    }
+    let needs_boundary = cue
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '\u{200c}');
+    if !needs_boundary {
+        return low.contains(cue);
+    }
+    let mut start = 0usize;
+    while let Some(pos) = low[start..].find(cue) {
+        let abs = start + pos;
+        let left_ok = abs == 0
+            || low[..abs]
+                .chars()
+                .next_back()
+                .is_none_or(is_word_boundary_char);
+        let right = abs + cue.len();
+        let right_ok = right >= low.len()
+            || low[right..]
+                .chars()
+                .next()
+                .is_none_or(is_word_boundary_char);
+        if left_ok && right_ok {
+            return true;
+        }
+        start = abs + cue.chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
 /// Classify an incoming prompt into [`TurnProfile`] locally in <10µs (zero AI tokens).
 pub fn classify_turn_profile(
     text: &str,
@@ -60,7 +97,7 @@ pub fn classify_turn_profile(
         return TurnProfile::Full;
     }
     let low = trimmed.to_ascii_lowercase();
-    if FULL_KEYWORDS.iter().any(|kw| low.contains(kw)) {
+    if FULL_KEYWORDS.iter().any(|kw| has_cue(&low, kw)) {
         return TurnProfile::Full;
     }
     if is_isolated || trimmed.is_empty() {
@@ -69,7 +106,7 @@ pub fn classify_turn_profile(
     if trimmed.chars().count() > 220 || trimmed.lines().count() > 3 {
         return TurnProfile::Standard;
     }
-    if NON_LITE_CUES.iter().any(|cue| low.contains(cue)) {
+    if NON_LITE_CUES.iter().any(|cue| has_cue(&low, cue)) {
         return TurnProfile::Standard;
     }
     TurnProfile::Lite
@@ -109,6 +146,14 @@ mod tests {
         );
         assert_eq!(
             classify_turn_profile("سلام", false, true),
+            TurnProfile::Standard
+        );
+        assert_eq!(
+            classify_turn_profile("کدام مدل بهتر است؟", false, false),
+            TurnProfile::Lite
+        );
+        assert_eq!(
+            classify_turn_profile("please read, summarize this", false, false),
             TurnProfile::Standard
         );
     }

@@ -492,9 +492,36 @@ async fn handle_legacy_messages(
     ext_ip: Option<axum::Extension<VerifiedClientIp>>,
     Json(body): Json<Value>,
 ) -> Response {
+    let cfg = rt.cfg_store.snapshot();
+    if cfg.mode == GatewayMode::Disabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "gateway_disabled", "message": "AGY MCP Gateway is paused by owner kill switch"})),
+        )
+            .into_response();
+    }
+    if !cfg.legacy_sse_enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "legacy_sse_disabled", "hint": "Use Streamable HTTP at POST /mcp"})),
+        )
+            .into_response();
+    }
     let Some(principal) = rt.authenticate(&headers) else {
         return rt.unauthorized_response(&headers);
     };
+    let rl = rt.guard.key_limiter.check(principal.principal_id.clone(), 1);
+    if !rl.allowed {
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "key_rate_limited", "retry_after": rl.retry_after_secs})),
+        )
+            .into_response();
+        if let Ok(hv) = HeaderValue::from_str(&rl.retry_after_secs.to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, hv);
+        }
+        return resp;
+    }
     let Some(sid) = q.session_id.as_deref() else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing sessionId"}))).into_response();
     };
@@ -509,7 +536,17 @@ async fn handle_legacy_messages(
     let client_ip = ext_ip
         .map(|e| e.0 .0)
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    if let Some((resp_val, _)) =
+    if let Some(arr) = body.as_array() {
+        for item in arr {
+            if let Some((resp_val, _)) =
+                process_jsonrpc_message(&rt, &principal, &client_ip, EndpointScope::SmartHub, item).await
+            {
+                if let Ok(line) = serde_json::to_string(&resp_val) {
+                    let _ = tx.send(line).await;
+                }
+            }
+        }
+    } else if let Some((resp_val, _)) =
         process_jsonrpc_message(&rt, &principal, &client_ip, EndpointScope::SmartHub, &body).await
     {
         if let Ok(line) = serde_json::to_string(&resp_val) {
@@ -573,7 +610,7 @@ async fn process_jsonrpc_message(
                             "name": format!("agy-telegram-{scope_name}"),
                             "version": env!("CARGO_PKG_VERSION")
                         },
-                        "instructions": "AGY Remote MCP Gateway. On /mcp (Smart Hub), use hub_discover_tools -> hub_tool_schema -> hub_call_tool to reach 120+ tools across 9 modular sections without context bloat, or connect directly to /mcp/s/<section>."
+                        "instructions": "AGY Remote MCP Gateway. On /mcp (Smart Hub), use hub_discover_tools -> hub_tool_schema -> hub_call_tool to reach 120+ tools across 10 modular sections without context bloat, or connect directly to /mcp/s/<section>."
                     }
                 }),
                 Some(sid),
@@ -625,6 +662,7 @@ async fn process_jsonrpc_message(
                     ))
                 }
                 Err(err_msg) => {
+                    let clean_err = agy_ext::mcp_client::redact_secrets_in_text(&err_msg);
                     rt.audit.record(
                         &principal.label,
                         client_ip,
@@ -632,14 +670,14 @@ async fn process_jsonrpc_message(
                         name,
                         "error",
                         ms,
-                        &err_msg,
+                        &clean_err,
                     );
                     Some((
                         json!({
                             "jsonrpc": "2.0",
                             "id": id,
                             "result": {
-                                "content": [{"type": "text", "text": format!("Error: {err_msg}")}],
+                                "content": [{"type": "text", "text": format!("Error: {clean_err}")}],
                                 "isError": true
                             }
                         }),

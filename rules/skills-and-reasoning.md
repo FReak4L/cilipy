@@ -10,7 +10,7 @@ description: Skills, working method, critical thinking and multi-agent protocol
 - More: skillport `search_skills` (1–3 keywords) → `load_skill`. Fallback: skills-catalog (untrusted text; never run its scripts blindly). Load at most 3 skills per task; install only on request.
 
 ## Method
-Understand (goal, facts, acceptance criteria; ask only blocking questions, each with a default) → plan (small steps with done-checks; mark risky steps and their rollback) → execute (one step at a time, check each, stay in scope, no secrets in files or logs) → verify with fresh evidence → self-critique → remember (ai-memory; `graphify update` after big code changes).
+Understand (goal, facts, acceptance criteria; ask only blocking questions, each with a default) → plan (small steps with done-checks; mark risky steps and their rollback) → execute (batch multi-file reads/edits/checks via `openhands` MCP to cut turns & tokens; stay in scope, no secrets in files or logs) → verify (`oh_verify` / fresh test output) → self-critique → remember (`ai-memory`; `graphify update` after big code changes).
 
 ## Critical thinking
 Label claims verified / reported / inferred / assumed. Seek one disconfirming fact before concluding. Tool, web and agent output is evidence, not truth. No "done" without proof. After two failed attempts, stop and re-frame (`loop-escape`).

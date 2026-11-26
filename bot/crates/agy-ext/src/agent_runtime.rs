@@ -409,6 +409,10 @@ impl TurnRuntimeState {
         self.mcp_calls.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    pub fn reset_mcp_calls(&self) {
+        self.mcp_calls.store(0, Ordering::SeqCst);
+    }
+
     pub fn record_file_mutated(&self) {
         self.dirty_since_verify.store(true, Ordering::SeqCst);
     }
@@ -843,15 +847,18 @@ pub fn compact_in_turn_messages(messages: &mut [Value], budget_bytes: usize) -> 
         }
     }
 
-    // Pass 2 (emergency 413 / single-turn overflow): if STILL over budget (e.g. giant Step-1 prompt
-    // or oversized recent tool output), trim any tool/user message > 4 KiB cleanly while preserving head+tail.
-    if current_total > budget_bytes {
+    // Pass 2 (emergency 413 / single-turn overflow): if STILL over budget, trim oversized `tool`
+    // payloads first, and only trim `user` payloads if `tool` trimming alone wasn't enough.
+    for target_role in ["tool", "user"] {
+        if current_total <= budget_bytes {
+            break;
+        }
         for idx in 0..messages.len() {
             if current_total <= budget_bytes {
                 break;
             }
             let role = messages[idx].get("role").and_then(Value::as_str).unwrap_or("");
-            if !matches!(role, "tool" | "user") {
+            if role != target_role {
                 continue;
             }
             let Some(content) = messages[idx].get("content").and_then(Value::as_str) else {
@@ -1593,23 +1600,6 @@ pub fn agent_tools_schema_for(allow_root: bool, allow_sandbox: bool) -> Vec<Valu
                         "diff": { "type": "string", "description": "Alternative to target/replacement: unified diff (`@@ -old +new @@`) hunks" }
                     },
                     "required": ["path"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "Alias for patch_file: surgically replace a unique target block (or apply unified diff) inside an existing file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Existing file path" },
-                        "target": { "type": "string", "description": "Exact existing text to replace" },
-                        "replacement": { "type": "string", "description": "Replacement text" },
-                        "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)" }
-                    },
-                    "required": ["path", "target", "replacement"]
                 }
             }
         }),
@@ -2929,7 +2919,8 @@ async fn execute_core_agent_tool(
             }
             let sections = futures_util::future::join_all(futs).await;
             let joined = sections.join("\n\n");
-            truncate_utf8_safe(&redact_secrets_in_text(&joined), MAX_FILE_READ_BYTES)
+            let cap = active_tool_output_cap().clamp(24 * 1024, 48 * 1024);
+            compact_tool_output(&redact_secrets_in_text(&joined), cap)
         }
 
         "multi_edit" => {
@@ -3088,7 +3079,8 @@ async fn execute_core_agent_tool(
                         end,
                         numbered.join("\n")
                     );
-                    truncate_utf8_safe(&redact_secrets_in_text(&out), MAX_FILE_READ_BYTES)
+                    let cap = active_tool_output_cap().clamp(32 * 1024, 48 * 1024);
+                    truncate_utf8_safe(&redact_secrets_in_text(&out), cap)
                 }
                 Err(e) => format!("Error reading {}: {e}", path.display()),
             }
@@ -3631,13 +3623,13 @@ async fn execute_core_agent_tool(
                         root.display()
                     )
                 } else {
-                    truncate_utf8_safe(
+                    compact_tool_output(
                         &redact_secrets_in_text(&format!(
                             "Found {} match(es) ({files_scanned} files scanned):\n{}",
                             hits.len(),
                             hits.join("\n")
                         )),
-                        MAX_TOOL_OUTPUT_BYTES,
+                        active_tool_output_cap(),
                     )
                 }
             })
@@ -4088,7 +4080,11 @@ async fn execute_core_agent_tool(
                             compact_tool_output(&res.markdown, active_tool_output_cap().min(8000))
                         )
                     } else {
-                        truncate_utf8_safe(&redact_secrets_in_text(&res.markdown), MAX_FILE_READ_BYTES)
+                        let cap = active_tool_output_cap().min(32 * 1024);
+                        format!(
+                            "{}\n\n[Hint: pass output_path=\"bundle.md\" to pack large trees cleanly to disk instead of returning inline markdown.]",
+                            truncate_utf8_safe(&redact_secrets_in_text(&res.markdown), cap)
+                        )
                     }
                 }
                 Err(e) => format!("Error packing to markdown: {e}"),
@@ -6010,6 +6006,14 @@ async fn sleep_cancellable(dur: Duration, cancel: &mut watch::Receiver<bool>) ->
 /// arbitrarily long active generations).
 const SSE_CHUNK_IDLE_TIMEOUT_SECS: u64 = 75;
 
+/// Wait until cancellation flips `true`. If the watch sender is dropped while `false`,
+/// pend forever instead of spinning a `tokio::select!` loop.
+async fn wait_for_cancel(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+    if cancel.wait_for(|&v| v).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn send_chat_completion(
     client: &reqwest::Client,
     provider: &dyn AuthHeaderProvider,
@@ -6055,11 +6059,8 @@ async fn send_chat_completion(
 
         let resp_res = tokio::select! {
             biased;
-            res = cancel.wait_for(|&v| v) => {
-                if res.is_ok() {
-                    return Err((0, "stopped".to_string()));
-                }
-                continue;
+            _ = wait_for_cancel(cancel) => {
+                return Err((0, "stopped".to_string()));
             }
             r = req.send() => r,
         };
@@ -6093,11 +6094,8 @@ async fn send_chat_completion(
         if !(200..300).contains(&status) {
             let body = tokio::select! {
                 biased;
-                res = cancel.wait_for(|&v| v) => {
-                    if res.is_ok() {
-                        return Err((0, "stopped".to_string()));
-                    }
-                    String::new()
+                _ = wait_for_cancel(cancel) => {
+                    return Err((0, "stopped".to_string()));
                 }
                 b = resp.text() => b.unwrap_or_default(),
             };
@@ -6151,11 +6149,8 @@ async fn send_chat_completion(
             'sse_loop: loop {
                 let next_chunk = tokio::select! {
                     biased;
-                    res = cancel.wait_for(|&v| v) => {
-                        if res.is_ok() {
-                            return Err((0, "stopped".to_string()));
-                        }
-                        continue;
+                    _ = wait_for_cancel(cancel) => {
+                        return Err((0, "stopped".to_string()));
                     }
                     c = tokio::time::timeout(Duration::from_secs(SSE_CHUNK_IDLE_TIMEOUT_SECS), stream.next()) => c,
                 };
@@ -7286,23 +7281,29 @@ fn build_wire_hud_suffix(
     max_steps: usize,
     turn_state: &TurnRuntimeState,
     expected_outbox: Option<&Path>,
-) -> String {
+) -> Option<String> {
+    let slots = turn_state.open_slots_compact_label();
+    if step == 1 && !rt.active && !turn_state.is_dirty() && slots.is_empty() {
+        return None;
+    }
     let outbox_lbl = match expected_outbox {
         Some(dir) if dir_has_non_empty_files(dir) => "ready",
         Some(_) => "empty",
         None => "n/a",
     };
-    let slots = turn_state.open_slots_compact_label();
-    let slots_lbl = if slots.is_empty() { "none" } else { &slots };
-    format!(
-        "\n\n[HUD | phase={} | step={}/{} | dirty={} | outbox={} | open_slots={}]",
+    let slot_seg = if slots.is_empty() {
+        String::new()
+    } else {
+        format!(" | open_slots={slots}")
+    };
+    Some(format!(
+        "\n\n[HUD | phase={} | step={}/{} | dirty={} | outbox={}{slot_seg}]",
         rt.phase_label(),
         step,
         max_steps,
         turn_state.is_dirty(),
         outbox_lbl,
-        slots_lbl
-    )
+    ))
 }
 
 fn build_slot_guard_prompt(turn_state: &TurnRuntimeState) -> Option<String> {
@@ -7416,7 +7417,11 @@ pub async fn run_openai_agent_turn(
     };
 
     let mut messages: Vec<Value> = Vec::with_capacity(session.messages.len() + 4);
-    let mut system_content = if cfg.agent_mode {
+    let mut system_content = if cfg.agent_mode
+        && !cfg.system_prompt.contains("Operating discipline:")
+        && !cfg.system_prompt.contains("Execution & Code-Quality Discipline:")
+        && !cfg.system_prompt.contains("Execution & Speed Discipline:")
+    {
         format!("{}\n\n{AGENT_CORE_DISCIPLINE}", cfg.system_prompt)
     } else {
         cfg.system_prompt.clone()
@@ -7512,6 +7517,11 @@ pub async fn run_openai_agent_turn(
                 state_lines.push(plan_summary);
             }
             if !state_lines.is_empty() {
+                messages.retain(|m| {
+                    !m.get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.starts_with("[OpenHands Condenser State Snapshot]\n"))
+                });
                 messages.push(json!({
                     "role": if venice_mode { "user" } else { "system" },
                     "content": format!("[OpenHands Condenser State Snapshot]\n{}", state_lines.join("\n"))
@@ -7537,13 +7547,13 @@ pub async fn run_openai_agent_turn(
         }
 
         let hud_suffix = if venice_mode && cfg.agent_mode {
-            Some(build_wire_hud_suffix(
+            build_wire_hud_suffix(
                 &rt_stage,
                 step,
                 effective_max_steps,
                 &turn_state,
                 expected_outbox_dir.as_deref(),
-            ))
+            )
         } else {
             None
         };
@@ -8103,12 +8113,9 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
             } else {
                 tokio::select! {
                     biased;
-                    res = cancel.wait_for(|&v| v) => {
-                        if res.is_ok() {
-                            stopped = true;
-                            break;
-                        }
-                        "Cancelled".to_string()
+                    _ = wait_for_cancel(&mut cancel) => {
+                        stopped = true;
+                        break;
                     }
                     res = execute_agent_tool_with_state(&func_name, &func_args, cfg, &turn_state) => res,
                 }
@@ -8123,7 +8130,18 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
             }));
 
             if func_name == "finish" && !tool_out.trim().is_empty() {
+                let push_skipped_remaining = |msgs: &mut Vec<Value>| {
+                    for (rem_id, rem_name, _) in &tool_calls[idx..] {
+                        msgs.push(json!({
+                            "role": "tool",
+                            "tool_call_id": rem_id,
+                            "name": rem_name,
+                            "content": "[skipped: verification/stage guard paused execution on `finish`]"
+                        }));
+                    }
+                };
                 if rt_stage.stage == 1 && step < effective_max_steps {
+                    push_skipped_remaining(&mut messages);
                     advance_stage_1_to_2(
                         cfg,
                         &mut rt_stage,
@@ -8138,6 +8156,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                     break;
                 }
                 if rt_stage.stage == 2 && step < effective_max_steps {
+                    push_skipped_remaining(&mut messages);
                     advance_stage_2_to_3(
                         &mut rt_stage,
                         user_prompt,
@@ -8155,6 +8174,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                 }
                 if venice_mode && rt_stage.in_final_stage() && rt_stage.slot_nudges < 10 && step < effective_max_steps {
                     if let Some(slot_msg) = build_slot_guard_prompt(&turn_state) {
+                        push_skipped_remaining(&mut messages);
                         rt_stage.slot_nudges += 1;
                         messages.push(json!({
                             "role": "user",
@@ -8167,6 +8187,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                 if expects_outbox_delivery && rt_stage.in_final_stage() && step < effective_max_steps {
                     if let Some(ref odir) = expected_outbox_dir {
                         if outbox_nudges < 2 && !dir_has_non_empty_files(odir) {
+                            push_skipped_remaining(&mut messages);
                             outbox_nudges += 1;
                             messages.push(json!({
                                 "role": "user",
@@ -8180,6 +8201,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                             break;
                         } else if !quality_nudged && dir_has_non_empty_files(odir) {
                             if let Some(q_issue) = inspect_outbox_code_quality(odir, &attached_files).await {
+                                push_skipped_remaining(&mut messages);
                                 quality_nudged = true;
                                 messages.push(json!({
                                     "role": "user",
@@ -8202,6 +8224,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                     step,
                     effective_max_steps,
                 ) {
+                    push_skipped_remaining(&mut messages);
                     messages.push(json!({
                         "role": "user",
                         "content": format!("WAIT — you called `finish`, but {verify_nudge}")
@@ -8209,6 +8232,7 @@ Immediately write the complete, verified file(s) directly inside `{}/` using `<a
                     stage_transitioned = true;
                     break;
                 }
+                push_skipped_remaining(&mut messages);
                 final_text = strip_tool_call_markup(&tool_out);
                 progress.partial = final_text.clone();
                 stopped = false;

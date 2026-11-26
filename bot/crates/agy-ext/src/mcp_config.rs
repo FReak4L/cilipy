@@ -5,7 +5,19 @@ use std::fs::{self, Permissions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+static MCP_CONFIG_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// Monotonic generation counter bumped on every `mcp_config.json` write so pools and UI caches invalidate cleanly.
+pub fn mcp_config_epoch() -> u64 {
+    MCP_CONFIG_EPOCH.load(Ordering::SeqCst)
+}
+
+fn bump_mcp_config_epoch() {
+    MCP_CONFIG_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
 
 fn mcp_config_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -54,7 +66,7 @@ pub const DEFAULT_MCP_CONFIG_PATH: &str = "/root/.gemini/config/mcp_config.json"
 pub const MASKED_SECRET: &str = "••••••••";
 
 const SENSITIVE_KEY_PATTERN: &str =
-    r"(TOKEN|KEY|SECRET|PASS|AUTH|BEARER|COOKIE|DSN|URI|CONNECTION|PRIVATE|CREDENTIAL)";
+    r"(TOKEN|KEY|SECRET|PASS|AUTH|BEARER|COOKIE|DSN|URI|URL|CONNECTION|PRIVATE|CREDENTIAL)";
 
 fn sensitive_key_regex() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
@@ -182,17 +194,38 @@ pub(crate) fn atomic_write_text(target: &Path, content: &str, mode: Option<u32>)
     Ok(())
 }
 
+fn resolve_config_target(config_path: &Path) -> PathBuf {
+    if fs::symlink_metadata(config_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        if let Ok(target) = fs::canonicalize(config_path) {
+            return target;
+        }
+        if let Ok(raw_link) = fs::read_link(config_path) {
+            if raw_link.is_absolute() {
+                return raw_link;
+            }
+            if let Some(parent) = config_path.parent() {
+                return parent.join(raw_link);
+            }
+        }
+    }
+    config_path.to_path_buf()
+}
+
 fn load_mcp_config(config_path: &Path) -> Result<(PathBuf, Map<String, Value>)> {
-    if !config_path.exists() {
+    let target = resolve_config_target(config_path);
+    if !target.exists() {
         return Err(BridgeError::NotFound(format!(
             "MCP config not found: {}",
             config_path.display()
         )));
     }
-    let raw = fs::read_to_string(config_path)
-        .map_err(|e| BridgeError::io(format!("reading MCP config {}", config_path.display()), e))?;
+    let raw = fs::read_to_string(&target)
+        .map_err(|e| BridgeError::io(format!("reading MCP config {}", target.display()), e))?;
     let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|e| BridgeError::json(format!("parsing MCP config {}", config_path.display()), e))?;
+        .map_err(|e| BridgeError::json(format!("parsing MCP config {}", target.display()), e))?;
 
     let mut root = match parsed {
         Value::Object(map) => map,
@@ -215,30 +248,32 @@ fn load_mcp_config(config_path: &Path) -> Result<(PathBuf, Map<String, Value>)> 
         }
     }
 
-    Ok((config_path.to_path_buf(), root))
+    Ok((target, root))
 }
 
 fn write_mcp_config(path: &Path, data: &Map<String, Value>) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+    let target = resolve_config_target(path);
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .map_err(|e| BridgeError::io(format!("creating config dir {}", parent.display()), e))?;
     }
 
-    if path.exists() {
-        let orig = fs::read_to_string(path)
-            .map_err(|e| BridgeError::io(format!("reading existing config {}", path.display()), e))?;
-        let file_name = path
+    if target.exists() {
+        let orig = fs::read_to_string(&target)
+            .map_err(|e| BridgeError::io(format!("reading existing config {}", target.display()), e))?;
+        let file_name = target
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("mcp_config.json");
-        let bak_path = path.with_file_name(format!("{file_name}.bak"));
+        let bak_path = target.with_file_name(format!("{file_name}.bak"));
         atomic_write_text(&bak_path, &orig, Some(0o600))?;
     }
 
     let mut serialized = serde_json::to_string_pretty(data)
         .map_err(|e| BridgeError::json("serializing MCP config", e))?;
     serialized.push('\n');
-    atomic_write_text(path, &serialized, Some(0o600))?;
+    atomic_write_text(&target, &serialized, Some(0o600))?;
+    bump_mcp_config_epoch();
     Ok(())
 }
 
@@ -265,10 +300,45 @@ fn format_mcp_server(name: &str, entry: &Map<String, Value>) -> McpServerView {
         .and_then(Value::as_object)
         .unwrap_or(&empty_map);
 
-    let masked_env = mask_json_map(raw_env);
-    let masked_headers = mask_json_map(raw_headers);
+    let masked_env: BTreeMap<String, String> = mask_json_map(raw_env)
+        .into_iter()
+        .map(|(k, v)| {
+            let clean = if v == MASKED_SECRET {
+                v
+            } else {
+                crate::mcp_client::redact_secrets_in_text(&v)
+            };
+            (k, clean)
+        })
+        .collect();
+    let masked_headers: BTreeMap<String, String> = mask_json_map(raw_headers)
+        .into_iter()
+        .map(|(k, v)| {
+            let clean = if v == MASKED_SECRET {
+                v
+            } else {
+                crate::mcp_client::redact_secrets_in_text(&v)
+            };
+            (k, clean)
+        })
+        .collect();
 
     let mut redacted = entry.clone();
+    for field in ["url", "serverUrl", "command"] {
+        if let Some(s) = redacted.get(field).and_then(Value::as_str).map(str::to_string) {
+            redacted.insert(
+                field.to_string(),
+                Value::String(crate::mcp_client::redact_secrets_in_text(&s)),
+            );
+        }
+    }
+    if let Some(arr) = redacted.get("args").and_then(Value::as_array).cloned() {
+        let clean_args: Vec<Value> = arr
+            .into_iter()
+            .map(|v| Value::String(crate::mcp_client::redact_secrets_in_text(&value_to_string(&v))))
+            .collect();
+        redacted.insert("args".to_string(), Value::Array(clean_args));
+    }
     if entry.get("env").and_then(Value::as_object).is_some() {
         let env_obj: Map<String, Value> = masked_env
             .iter()
@@ -284,10 +354,14 @@ fn format_mcp_server(name: &str, entry: &Map<String, Value>) -> McpServerView {
         redacted.insert("headers".to_string(), Value::Object(hdr_obj));
     }
 
-    let args = entry
+    let args: Vec<String> = entry
         .get("args")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().map(value_to_string).collect())
+        .map(|arr| {
+            arr.iter()
+                .map(|v| crate::mcp_client::redact_secrets_in_text(&value_to_string(v)))
+                .collect()
+        })
         .unwrap_or_default();
 
     let enabled = !entry
@@ -295,11 +369,10 @@ fn format_mcp_server(name: &str, entry: &Map<String, Value>) -> McpServerView {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let command = entry
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let command = crate::mcp_client::redact_secrets_in_text(
+        entry.get("command").and_then(Value::as_str).unwrap_or(""),
+    );
+    let url = crate::mcp_client::redact_secrets_in_text(&url);
 
     let env_keys = raw_env.keys().cloned().collect();
 
@@ -689,12 +762,13 @@ pub fn replace_mcp_server_value(
     }
 
     let _guard = mcp_config_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let (path, mut data) = if config_path.exists() {
-        load_mcp_config(config_path)?
+    let target_path = resolve_config_target(config_path);
+    let (path, mut data) = if fs::symlink_metadata(&target_path).is_ok() {
+        load_mcp_config(&target_path)?
     } else {
         let mut root = Map::new();
         root.insert("mcpServers".to_string(), Value::Object(Map::new()));
-        (config_path.to_path_buf(), root)
+        (target_path, root)
     };
 
     let orig_entry = data

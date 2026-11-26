@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/FReak4L/cilipy/actions/workflows/ci.yml/badge.svg)](https://github.com/FReak4L/cilipy/actions/workflows/ci.yml)
 [![Security](https://github.com/FReak4L/cilipy/actions/workflows/security.yml/badge.svg)](https://github.com/FReak4L/cilipy/actions/workflows/security.yml)
+[![CodeQL & Audit](https://github.com/FReak4L/cilipy/actions/workflows/codeql-and-audit.yml/badge.svg)](https://github.com/FReak4L/cilipy/actions/workflows/codeql-and-audit.yml)
 [![Release](https://img.shields.io/github/v/release/FReak4L/cilipy?sort=semver)](https://github.com/FReak4L/cilipy/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -23,7 +24,7 @@ A modular, security-hardened Telegram bridge and AI tooling stack built around a
 | Documentation | `docs/` | Telegram Rich Message / Widget / Parallel docs (`docs/telegram-docs/`) & runbooks (`bot/docs/`) |
 | Deployment & Config Templates | `deploy/` | `systemd` units, `bot.env.example`, `mcp_config.example.json`, `agent-browser.json`, `Caddyfile.example`, `install.sh` |
 | GitOps Updater & Utility Tools | `scripts/` | `agy-updater.sh`, `sync-to-github.sh`, and `scripts/tools/` verification/extraction scripts |
-| CI/CD & Security | `.github/` | Rust/Python/Node CI, `gitleaks` secret scan, `release-please`, tagged release builds, Dependabot, templates |
+| CI/CD & Automation Bots | `.github/` | Rust/Python/Node CI, `gitleaks`, CodeQL + Cargo/NPM audit bot, Dependabot auto-merge bot, PR/Issue triage bot, `release-please` |
 
 ---
 

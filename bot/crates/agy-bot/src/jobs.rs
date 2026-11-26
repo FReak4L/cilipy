@@ -1596,13 +1596,21 @@ impl JobManager {
                 req.overrides.isolated,
             );
             tracing::debug!(uid = req.uid, profile = profile.as_str(), "dynamic turn profile selected");
-            if profile == crate::turn_profile::TurnProfile::Lite {
-                // Keep all MCPs, skills, and .md rules intact; trim only unused slash-command
-                // expansion and default thinking effort when the user has not chosen one.
-                if effort.as_deref().is_none_or(str::is_empty) {
-                    effort = Some("low".to_string());
+            match profile {
+                crate::turn_profile::TurnProfile::Lite => {
+                    // Keep all MCPs, skills, and .md rules intact; trim only unused slash-command
+                    // expansion and default thinking effort when the user has not chosen one.
+                    if effort.as_deref().is_none_or(str::is_empty) {
+                        effort = Some("low".to_string());
+                    }
+                    extra_flags.push("--disable-slash-commands".to_string());
                 }
-                extra_flags.push("--disable-slash-commands".to_string());
+                crate::turn_profile::TurnProfile::Standard => {
+                    if effort.as_deref().is_none_or(str::is_empty) {
+                        effort = Some("medium".to_string());
+                    }
+                }
+                crate::turn_profile::TurnProfile::Full => {}
             }
         }
 
@@ -2108,6 +2116,15 @@ impl JobManager {
                 .as_deref()
                 .unwrap_or_else(|| Path::new(&self.cfg.agy_workspace));
 
+            let turn_profile = self.cfg.agy_dynamic_profile.then(|| {
+                crate::turn_profile::classify_turn_profile(
+                    &req.text,
+                    !req.attachments.is_empty(),
+                    req.overrides.isolated,
+                )
+            });
+            let is_lite_turn = turn_profile == Some(crate::turn_profile::TurnProfile::Lite);
+
             let run_res = if backend == "uncensored" {
                 used_account = Some("venice-uncensored".to_string());
                 let model_choice = base_req
@@ -2125,8 +2142,12 @@ impl JobManager {
                 ));
                 let sess_key = (!req.overrides.isolated)
                     .then(|| crate::handlers_uncensored::uncensored_session_key(req.uid));
-                let three_stage_mode =
-                    crate::handlers_uncensored::uncensored_three_stage_mode(&user_state);
+                let three_stage_mode = if is_lite_turn && req.overrides.force_agent_mode.is_none() {
+                    agy_ext::agent_runtime::ThreeStageMode::Off
+                } else {
+                    crate::handlers_uncensored::uncensored_three_stage_mode(&user_state)
+                };
+                let max_steps_override = if is_lite_turn { Some(4) } else { None };
                 let custom_sys =
                     agy_ext::uncensored::load_custom_sysprompt(&self.cfg.state_dir, req.uid);
                 let enriched_prompt = agy_ext::uncensored::enrich_prompt_with_attachments(
@@ -2150,7 +2171,7 @@ impl JobManager {
                     allow_root,
                     allow_sandbox,
                     agent_mode,
-                    None,
+                    max_steps_override,
                     custom_sys.as_deref(),
                     three_stage_mode,
                     Some(progress_cb),

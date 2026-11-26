@@ -147,16 +147,23 @@ async fn main() -> anyhow::Result<()> {
         CliMode::SelfUpdate(staged) => {
             let _cfg = Config::from_env().context("loading configuration")?;
             let exe = std::env::current_exe().context("locating current binary")?;
-            let backup_dir = PathBuf::from("/opt/agy-telegram/backups/bin");
+            let backup_dir = std::env::var("AGY_BACKUP_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/opt/agy-telegram/backups/bin"));
             let report = atomic_self_update(&staged, &exe, &backup_dir)
                 .context("--self-update failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         CliMode::Rollback => {
-            let _cfg = Config::from_env().context("loading configuration")?;
             let exe = std::env::current_exe().context("locating current binary")?;
-            let backup_dir = PathBuf::from("/opt/agy-telegram/backups/bin");
+            let backup_dir = std::env::var("AGY_BACKUP_DIR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/opt/agy-telegram/backups/bin"));
             let report = rollback_binary(&exe, &backup_dir).context("--rollback failed")?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -429,7 +436,10 @@ async fn run_bridge() -> anyhow::Result<()> {
         )
         .context("initializing JobManager")?,
     );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // Multi-account Antigravity pool (accounts.json + per-account shadow HOMEs).
+    let mut models_task: Option<tokio::task::JoinHandle<()>> = None;
     {
         let primary_home = std::env::var("AGY_HOME")
             .ok()
@@ -464,10 +474,24 @@ async fn run_bridge() -> anyhow::Result<()> {
                 let jobs_m = Arc::clone(&jobs);
                 let store_m = Arc::clone(&store);
                 let render_m = Arc::clone(&render);
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                let mut models_rx = shutdown_rx.clone();
+                models_task = Some(tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
+                        res = models_rx.changed() => {
+                            if res.is_err() || *models_rx.borrow() {
+                                return;
+                            }
+                        }
+                    }
                     loop {
+                        if *models_rx.borrow() {
+                            break;
+                        }
                         for a in pool.list() {
+                            if *models_rx.borrow() {
+                                return;
+                            }
                             if a.is_primary() || !a.enabled || a.health.status == agy_core::accounts::HealthStatus::Disabled {
                                 continue;
                             }
@@ -478,14 +502,28 @@ async fn run_bridge() -> anyhow::Result<()> {
                                     _ => None,
                                 };
                                 let _ = models_pool::refresh_with_proxy(&cfg_m, &a, px_opt.as_deref()).await;
-                                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                                tokio::select! {
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
+                                    res = models_rx.changed() => {
+                                        if res.is_err() || *models_rx.borrow() {
+                                            return;
+                                        }
+                                    }
+                                }
                             }
                         }
                         mark_stale_user_models(&jobs_m, &store_m);
                         alert_duplicate_accounts(&pool, &store_m, &render_m, cfg_m.owner_id).await;
-                        tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)) => {}
+                            res = models_rx.changed() => {
+                                if res.is_err() || *models_rx.borrow() {
+                                    break;
+                                }
+                            }
+                        }
                     }
-                });
+                }));
             }
             Err(err) => warn!(error = %err, "account pool unavailable; running single-account"),
         }
@@ -567,8 +605,6 @@ async fn run_bridge() -> anyhow::Result<()> {
         "HTTP server listening (/w/*, /api/w/*, /tg/webhook, /healthz)"
     );
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
     // Embedded Remote MCP Gateway (127.0.0.1:8788, isolated from :8787 WebApp/Webhook).
     let mcp_gw_task = match agy_mcp_gateway::McpGatewayHandle::open(
         cfg.state_dir.clone(),
@@ -632,8 +668,8 @@ async fn run_bridge() -> anyhow::Result<()> {
                 _ = tick.tick() => {
                     let _ = outbox_ctx.render.flush_outbox().await;
                 }
-                _ = outbox_rx.changed() => {
-                    if *outbox_rx.borrow() {
+                res = outbox_rx.changed() => {
+                    if res.is_err() || *outbox_rx.borrow() {
                         break;
                     }
                 }
@@ -650,13 +686,17 @@ async fn run_bridge() -> anyhow::Result<()> {
     };
 
     // Background sticky proxy health prober: gently probes registered AI egress proxies every 15 min.
-    {
+    let px_task = {
         let px_ctx = Arc::clone(&ctx);
         let mut px_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(45)) => {}
-                _ = px_rx.changed() => if *px_rx.borrow() { return },
+                res = px_rx.changed() => {
+                    if res.is_err() || *px_rx.borrow() {
+                        return;
+                    }
+                }
             }
             loop {
                 if !px_ctx.proxies.list().is_empty() {
@@ -665,22 +705,30 @@ async fn run_bridge() -> anyhow::Result<()> {
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(15 * 60)) => {}
-                    _ = px_rx.changed() => if *px_rx.borrow() { break },
+                    res = px_rx.changed() => {
+                        if res.is_err() || *px_rx.borrow() {
+                            break;
+                        }
+                    }
                 }
             }
-        });
-    }
+        })
+    };
 
     // Skill Hub + Fleet Auto-Updater: refresh GitHub sources every 24 h, safely update
     // AutoSafe upstream-tracked skills (preserving protected files & seal), and check third-party MCPs.
-    {
+    let hub_task = {
         let sd = ctx.cfg.state_dir.clone();
         let mut hub_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)) => {}
-                    _ = hub_rx.changed() => if *hub_rx.borrow() { break },
+                    res = hub_rx.changed() => {
+                        if res.is_err() || *hub_rx.borrow() {
+                            break;
+                        }
+                    }
                 }
                 if agy_ext::skill_hub::load_lock(&sd).is_empty() {
                     continue;
@@ -732,8 +780,8 @@ async fn run_bridge() -> anyhow::Result<()> {
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     let cron_task = if cfg.cron_enabled {
         let cron_ref = Arc::clone(&ctx.cron);
@@ -771,6 +819,13 @@ async fn run_bridge() -> anyhow::Result<()> {
     )
     .with_allowed_updates(allowed);
 
+    let mut stop_rx = shutdown_rx.clone();
+    let stop_ctx = Arc::clone(&ctx);
+    let stop_jobs_task = tokio::spawn(async move {
+        let _ = stop_rx.wait_for(|&v| v).await;
+        stop_ctx.jobs.stop_all().await;
+    });
+
     let sup_res = supervisor.run(shutdown_rx).await;
     let _ = shutdown_tx.send(true);
     sd_notify_stopping();
@@ -778,8 +833,14 @@ async fn run_bridge() -> anyhow::Result<()> {
 
     signal_task.abort();
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let _ = stop_jobs_task.await;
         let _ = outbox_task.await;
         let _ = auto_task.await;
+        let _ = px_task.await;
+        let _ = hub_task.await;
+        if let Some(mt) = models_task {
+            let _ = mt.await;
+        }
         if let Some(ct) = cron_task {
             let _ = ct.await;
         }
