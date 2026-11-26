@@ -34,7 +34,7 @@ jobs:
           tar -czf dist-release/cilipy-rules-skills.tar.gz rules skills docs
           (cd dist-release && sha256sum *.tar.gz > SHA256SUMS.txt)
       - name: Upload assets to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist-release/agy-telegram-linux-x86_64.tar.gz
