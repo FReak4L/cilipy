@@ -1,0 +1,16 @@
+# Example Caddy reverse-proxy configuration (replace domains with your own)
+
+example.sslip.io {
+    reverse_proxy 127.0.0.1:8787
+}
+
+mcp.example.com {
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy 127.0.0.1:8788 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+    }
+}

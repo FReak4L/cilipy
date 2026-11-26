@@ -1,0 +1,6 @@
+[Unit]
+Description=agy-telegram health check
+
+[Service]
+Type=oneshot
+ExecStart=/root/agy-stack/app/healthcheck.sh

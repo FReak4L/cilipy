@@ -1,0 +1,25 @@
+[Unit]
+Description=SearXNG metasearch engine (127.0.0.1:8888 only)
+After=network.target
+Documentation=https://docs.searxng.org/admin/installation-searxng.html
+
+[Service]
+Type=simple
+User=searxng
+Group=searxng
+WorkingDirectory=/usr/local/searxng/searxng-src
+Environment=SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+Environment=SEARXNG_BIND_ADDRESS=127.0.0.1
+Environment=SEARXNG_PORT=8888
+ExecStart=/usr/local/searxng/searx-pyenv/bin/python -m searx.webapp
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/usr/local/searxng
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
