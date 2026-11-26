@@ -1,0 +1,5 @@
+[build]
+jobs = 2
+
+[env]
+PATH = { value = "/root/.cargo/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin" }

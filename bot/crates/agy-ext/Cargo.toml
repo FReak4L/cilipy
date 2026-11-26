@@ -1,0 +1,30 @@
+[package]
+name = "agy-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agy-core = { path = "../agy-core" }
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+regex-syntax = "0.8"
+shell-words.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+libc.workspace = true
+uuid.workspace = true
+url.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+similar.workspace = true
+ignore.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

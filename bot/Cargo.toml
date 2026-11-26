@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agy-core",
+    "crates/agy-render",
+    "crates/agy-net",
+    "crates/agy-ext",
+    "crates/agy-widgets",
+    "crates/agy-mcp-gateway",
+    "crates/agy-bot",
+]
+
+[workspace.package]
+version = "4.0.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.44", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "socks", "stream"] }
+axum = { version = "0.8", features = ["json", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit", "set-header"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2.6"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+regex = "1.11"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+url = "2.5"
+uuid = { version = "1.16", features = ["v4", "fast-rng"] }
+cron = "0.15"
+libc = "0.2"
+dashmap = "6.1"
+bytes = "1.10"
+futures-util = "0.3"
+shell-words = "1.1"
+tempfile = "3.19"
+unicode-width = "0.2"
+html-escape = "0.2"
+tokio-util = { version = "0.7", features = ["rt", "io"] }
+similar = "2"
+ignore = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = "symbols"
+panic = "abort"
