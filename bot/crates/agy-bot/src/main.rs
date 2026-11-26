@@ -13,6 +13,7 @@ mod cron;
 mod ctx;
 mod handlers_accounts;
 mod handlers_business;
+mod handlers_gemini;
 mod handlers_grok;
 mod handlers_grok_bot;
 mod handlers_mcp;
@@ -1323,6 +1324,9 @@ async fn handle_callback(ctx: &Arc<BotCtx>, cq: &CallbackQuery) {
     if Box::pin(handlers_uncensored::handle_uncensored_cb(ctx, cq, uid, chat_id, data)).await {
         return;
     }
+    if Box::pin(handlers_gemini::handle_gemini_cb(ctx, cq, uid, chat_id, data)).await {
+        return;
+    }
     if Box::pin(handlers_grok::handle_grok_cb(ctx, cq, uid, chat_id, data)).await {
         return;
     }
@@ -1425,6 +1429,13 @@ async fn handle_message(ctx: &Arc<BotCtx>, msg: &Message) {
         {
             return;
         }
+        if Box::pin(handlers_gemini::handle_gemini_awaiting_text(
+            ctx, uid, chat_id, &inp, raw_text,
+        ))
+        .await
+        {
+            return;
+        }
         if handlers_mcpgw::handle_mcpgw_awaiting_text(ctx, uid, chat_id, &inp, raw_text).await {
             return;
         }
@@ -1463,7 +1474,10 @@ fn mark_stale_user_models(jobs: &Arc<JobManager>, store: &Arc<StateStore>) {
         let Ok(uid) = k.parse::<i64>() else { continue };
         let Some(m) = u.model.clone().filter(|m| !m.is_empty()) else { continue };
         let eng = u.extra.get("engine").and_then(|v| v.as_str());
-        let is_external = matches!(eng, Some("uncensored") | Some("grok") | Some("grok_bot"))
+        let is_external = matches!(
+            eng,
+            Some("uncensored") | Some("gemini_web") | Some("grok") | Some("grok_bot")
+        )
             || agy_ext::uncensored::is_uncensored_model(&m)
             || agy_ext::grok_oauth::is_grok_model(&m);
         let stale = !is_external && !jobs.model_known_anywhere(&m);
@@ -1607,7 +1621,12 @@ async fn dispatch_slash_command(ctx: &Arc<BotCtx>, msg: &Message, raw_text: &str
         "stop" => handlers_system::cmd_stop(ctx, msg, &arg).await,
         "cancel" => handlers_system::cmd_cancel(ctx, msg, &arg).await,
         "model" => handlers_system::cmd_model(ctx, msg, &arg).await,
-        "uncensored" | "umodel" | "umodels" => handlers_uncensored::cmd_uncensored(ctx, msg, &arg).await,
+        "uncensored" | "umodel" | "umodels" | "venice" => {
+            handlers_uncensored::cmd_uncensored(ctx, msg, &arg).await
+        }
+        "webmodel" => Box::pin(handlers_gemini::cmd_web_model(ctx, msg, &arg)).await,
+        "gemini" => Box::pin(handlers_gemini::cmd_web_model(ctx, msg, "gemini")).await,
+        "gems" => Box::pin(handlers_gemini::cmd_web_model(ctx, msg, "gems")).await,
         "uagent" => handlers_uncensored::cmd_uagent(ctx, msg, &arg).await,
         "grok" | "gmodel" | "gmodels" => handlers_grok::cmd_grok(ctx, msg, &arg).await,
         "gagent" => handlers_grok::cmd_gagent(ctx, msg, &arg).await,
@@ -2457,7 +2476,7 @@ mod tests {
             assert!(txt.contains("Antigravity Chat"));
             let dumped_mk = sent.1["reply_markup"].to_string();
             assert!(!dumped_mk.contains("\"models:0\""));
-            assert!(!dumped_mk.contains("\"umodels:0\""));
+            assert!(!dumped_mk.contains("\"webmodel:home\""));
             assert!(!dumped_mk.contains("\"grok:open\""));
             assert!(!dumped_mk.contains("uadm:"));
         }
@@ -2481,7 +2500,7 @@ mod tests {
             let calls = st.calls.lock().await;
             let sent = calls.iter().find(|(m, _)| m == "sendMessage").expect("custom /menu sendMessage");
             let dumped_mk = sent.1["reply_markup"].to_string();
-            assert!(dumped_mk.contains("\"umodels:0\""));
+            assert!(dumped_mk.contains("\"webmodel:home\""));
             assert!(dumped_mk.contains("\"sessions\""));
             assert!(!dumped_mk.contains("\"models:0\""));
             assert!(!dumped_mk.contains("\"grok:open\""));
@@ -2498,7 +2517,7 @@ mod tests {
             let sent = calls.iter().find(|(m, _)| m == "sendMessage").expect("admin /menu sendMessage");
             let dumped_mk = sent.1["reply_markup"].to_string();
             assert!(dumped_mk.contains("models:0"));
-            assert!(dumped_mk.contains("umodels:0"));
+            assert!(dumped_mk.contains("webmodel:home"));
             assert!(dumped_mk.contains("grok:open"));
             assert!(dumped_mk.contains("px:list"));
             assert!(dumped_mk.contains("home:1"));

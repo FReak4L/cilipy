@@ -8,6 +8,7 @@ pub mod command_guard;
 pub mod engines;
 pub mod exec_backend;
 pub mod fleet_updater;
+pub mod gemini_web;
 pub mod grok_bot;
 pub mod grok_oauth;
 pub mod login;

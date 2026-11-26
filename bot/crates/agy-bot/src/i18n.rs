@@ -210,7 +210,7 @@ pub const fn t(lang: Lang, key: Tx) -> &'static str {
         Tx::BtnMenu => ["منو", "Menu", "Tabula", "主菜单", "Меню"],
         Tx::BtnNewChat => ["گفتگوی جدید", "New chat", "Nova colloquia", "新对话", "Новый чат"],
         Tx::BtnModel => ["مدل", "Model", "Exemplar", "模型", "Модель"],
-        Tx::BtnUncensored => ["بدون سانسور", "Uncensored", "Libera AI", "无审查模型", "Без цензуры"],
+        Tx::BtnUncensored => ["وب مدل", "Web Model", "Web Model", "Web 模型", "Web-модель"],
         Tx::BtnGrok => ["گراک", "Grok", "Grok", "Grok 模型", "Grok"],
         Tx::BtnStatus => ["وضعیت", "Status", "Status", "状态", "Статус"],
         Tx::BtnMcp => ["ابزارهای MCP", "MCPs", "MCP", "MCP 服务", "MCP"],
