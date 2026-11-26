@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.4.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.3.0...cilipy-v4.4.0) (2026-11-26)
+
+
+### Features
+
+* add Web Model Hub, resilient Gemini Manager & OpenHands agent support ([fe9b137](https://github.com/FReak4L/cilipy/commit/fe9b137ecc5fb00c8277b99ee24e086692d4e693))
+* add Web Model Hub, resilient Gemini Manager & OpenHands agent support ([5dfb467](https://github.com/FReak4L/cilipy/commit/5dfb467ba1b4d8d4fad6e1e05110ce24301facc5))
+
 ## [4.3.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.2.0...cilipy-v4.3.0) (2026-11-26)
 
 
