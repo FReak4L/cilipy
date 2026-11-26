@@ -146,11 +146,13 @@ pub fn recent_turns(state_dir: &Path, uid: i64, cid: Option<&str>, max: usize) -
         .lines()
         .filter_map(|l| serde_json::from_str::<TurnRecord>(l).ok())
         .collect();
-    let same: Vec<TurnRecord> = match cid {
-        Some(c) if !c.is_empty() => all.iter().filter(|t| t.cid.as_deref() == Some(c)).cloned().collect(),
-        _ => Vec::new(),
+    let src = match cid {
+        Some(c) if !c.is_empty() => all
+            .into_iter()
+            .filter(|t| t.cid.as_deref() == Some(c))
+            .collect::<Vec<_>>(),
+        _ => all,
     };
-    let src = if same.is_empty() { all } else { same };
     let start = src.len().saturating_sub(max);
     src[start..].to_vec()
 }
@@ -223,9 +225,9 @@ pub fn context_pack(
 /// Build the recall directive (fallback 2).
 pub fn recall_directive(workspace: &Path, uid: i64, cid: Option<&str>) -> String {
     format!(
-        "[session-handoff] This conversation was moved to another Antigravity account and its history is not available in this conversation. Before answering, rebuild context yourself: (1) read the handoff note {} if it exists; (2) use the ai-memory MCP to search for `handoff tg-{uid}`{} and load the most recent handoff/session-summary memories; (3) use graphify/gortex only if code context is needed. Then continue the user's request below. Keep the rebuild brief and do not mention it unless it fails.\n",
+        "[session-handoff] This conversation was moved to another Antigravity account and its history is not available in this conversation. Before answering, rebuild context yourself: (1) read the handoff note {} if it exists; (2) use the ai-memory MCP `memory_search` with `query:\"handoff tg-{uid}\"{}` and `tags:[\"tg-{uid}\"]` ONLY (never combine with `\"handoff\"` in `tags`, as ai-memory matches ANY tag) to load only this user's latest handoff memory; (3) use graphify/gortex only if code context is needed. Then continue the user's request below. Keep the rebuild brief and do not mention it unless it fails.\n",
         handoff_note_path(workspace, uid).display(),
-        cid.map(|c| format!(" and `conv {c}`")).unwrap_or_default()
+        cid.map(|c| format!(" (conv {c})")).unwrap_or_default()
     )
 }
 
@@ -252,6 +254,8 @@ mod tests {
         assert_eq!(turns.len(), 3);
         assert!(turns.iter().all(|t| t.cid.as_deref() == Some("c1")));
         assert_eq!(turns.last().unwrap().prompt, "q208");
+        // Unknown cid must NOT leak turns from older unrelated conversations
+        assert!(recent_turns(&st, 5, Some("brand-new-cid"), 3).is_empty());
 
         fs::create_dir_all(ws.join(".handoff")).unwrap();
         fs::write(handoff_note_path(&ws, 5), "Goal: ship feature X. Next: run tests.").unwrap();
@@ -260,7 +264,7 @@ mod tests {
         assert!(pack.contains("q208"));
         assert!(pack.chars().count() <= 2600);
         let r = recall_directive(&ws, 5, Some("c1"));
-        assert!(r.contains("handoff tg-5") && r.contains("conv c1"));
+        assert!(r.contains("handoff tg-5") && r.contains("conv c1") && r.contains("tags:[\"tg-5\"]"));
         assert_eq!(Continuity::Resume.next(), Some(Continuity::Replay));
         assert_eq!(Continuity::Recall.next(), None);
     }

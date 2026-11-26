@@ -26,8 +26,10 @@ pub const MAX_RPC_CALLS_PER_RUN: usize = 150;
 /// Maximum timeout for an `execute_code` script (300 seconds / 5 minutes).
 pub const MAX_CODE_EXEC_TIMEOUT_SECS: u64 = 300;
 /// Output budget for `execute_code` stdout (12 KiB head + 38 KiB tail = 50 KiB).
-const CODE_EXEC_HEAD_BYTES: usize = 12 * 1024;
-const CODE_EXEC_TAIL_BYTES: usize = 38 * 1024;
+/// Align with `DEFAULT_EARLY_TOOL_OUTPUT_BYTES` (24 KiB) so `execute_code` stdout is not
+/// truncated twice across layers.
+const CODE_EXEC_HEAD_BYTES: usize = 10 * 1024;
+const CODE_EXEC_TAIL_BYTES: usize = 12 * 1024;
 
 /// Allowed tools callable from Python via `agy_tools` RPC (explicitly excludes recursive `execute_code`).
 const ALLOWED_RPC_TOOLS: &[&str] = &[
@@ -182,16 +184,19 @@ def md_to_code(target_dir: str, markdown: str, dry_run: bool = False) -> str:
     return _call("md_to_code", {"target_dir": target_dir, "markdown": markdown, "dry_run": bool(dry_run)})
 
 
-def web_search(query: str, profile: str = "hybrid", limit: int = 8) -> str:
-    return _call("web_search", {"query": query, "profile": profile, "limit": int(limit)})
+def web_search(query: str, profile: str = "hybrid", limit: int = 8, strict_ast: bool = False, allow_relax: bool = True) -> str:
+    return _call("web_search", {"query": query, "profile": profile, "limit": int(limit), "strict_ast": bool(strict_ast), "allow_relax": bool(allow_relax)})
 
 
 def fetch_url(url: str, max_chars: int = 12000) -> str:
     return _call("fetch_url", {"url": url, "max_chars": int(max_chars)})
 
 
-def memory_search(query: str, limit: int = 5) -> str:
-    return _call("memory_search", {"query": query, "limit": int(limit)})
+def memory_search(query: str, limit: int = 5, tags=None) -> str:
+    args = {"query": query, "limit": int(limit)}
+    if tags is not None:
+        args["tags"] = list(tags)
+    return _call("memory_search", args)
 
 
 def memory_store(title: str, summary: str, type: str = "fact", tags=None) -> str:

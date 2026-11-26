@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,6 +139,75 @@ async def _collect_queries(
     return collected[:max_queries], "+".join(labels)
 
 
+# Process-wide persistent engine health/bandit cache so Thompson Sampling (α/β)
+# and circuit-breaker parking survive across individual MCP tool calls instead of
+# cold-starting and hammering broken/throttled engines on every single query.
+_PERSISTENT_ENGINE_HEALTH: dict[str, dict[str, float]] = {}
+
+# Informed cold-start priors favoring fast local/healthy aggregators over JS-walled scrapers.
+# Runtime Thompson Sampling still adapts dynamically if any engine degrades or recovers.
+_DEFAULT_ENGINE_PRIORS: dict[str, tuple[float, float]] = {
+    "searxng": (6.0, 1.0),
+    "ddg_html": (3.5, 1.0),
+    "yahoo_direct": (2.0, 1.5),
+    "google_cse": (4.0, 1.0),
+    "ddg_lite": (1.0, 2.5),
+    "ddgs": (1.0, 2.5),
+    "google_web_udm14": (1.0, 3.0),
+    "google_mobile_web": (1.0, 3.0),
+    "google_basic_html": (1.0, 3.0),
+}
+
+_STRICT_DORK_OP_RE = re.compile(
+    r"\b(?:inurl|allinurl|intitle|allintitle|filetype|ext|intext|allintext):",
+    re.IGNORECASE,
+)
+
+
+def _auto_strict_ast(query: str, explicit: Any) -> bool:
+    """Use caller's explicit `strict_ast` when given; otherwise enable strict snippet AST
+    only for specialized dork operators (broad research queries default to relaxed recall)."""
+    if explicit is not None:
+        return bool(explicit)
+    return bool(_STRICT_DORK_OP_RE.search(query))
+
+
+def _hydrate_registry_health(registry: Any) -> None:
+    """Restore persisted Thompson Sampling arms (or informed cold-start priors) and park windows."""
+    now = time.monotonic()
+    with registry._lock:
+        for name, state in registry._states.items():
+            snap = _PERSISTENT_ENGINE_HEALTH.get(name)
+            if snap is not None:
+                registry._bandit.set_arm_params(
+                    name,
+                    float(snap.get("alpha", 1.0)),
+                    float(snap.get("beta", 1.0)),
+                )
+                state.dynamic_penalty = float(snap.get("dynamic_penalty", state.dynamic_penalty))
+                parked_until = float(snap.get("parked_until", 0.0))
+                if parked_until > now:
+                    state.parked_until = parked_until
+                    state.metrics.parked = True
+            elif name in _DEFAULT_ENGINE_PRIORS:
+                prior_a, prior_b = _DEFAULT_ENGINE_PRIORS[name]
+                registry._bandit.set_arm_params(name, prior_a, prior_b)
+            registry._sync_bandit_metrics(name)
+
+
+def _persist_registry_health(registry: Any) -> None:
+    """Persist updated Thompson Sampling arms and circuit-breaker park windows."""
+    with registry._lock:
+        for name, state in registry._states.items():
+            arm = registry._bandit.get_arm(name)
+            _PERSISTENT_ENGINE_HEALTH[name] = {
+                "alpha": float(arm.alpha),
+                "beta": float(arm.beta),
+                "dynamic_penalty": float(state.dynamic_penalty),
+                "parked_until": float(state.parked_until),
+            }
+
+
 def _build_settings(
     ws: WorkspacePaths,
     *,
@@ -164,6 +234,9 @@ def _build_settings(
             "poisson_mean_delay": max(0.05, min(float(poisson_mean), 10.0)),
             "max_retries": 1,
             "request_timeout": 10.0,
+            "engine_park_bot_threshold": 2,
+            "engine_park_empty_threshold": 2,
+            "engine_park_seconds": 180.0,
             "enable_cache": bool(use_cache),
             "cache_db_path": ws.cache / "search_cache.db",
             "searxng_url": searxng_url or os.environ.get("SEARXNG_URL") or None,
@@ -314,13 +387,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
                 "strict_ast": {
                     "type": "boolean",
-                    "default": True,
-                    "description": "Enforce deterministic Boolean AST truth-table verification (zero false positives).",
+                    "description": (
+                        "Enforce deterministic Boolean AST snippet verification. Defaults to auto: "
+                        "true for strict dork operators (inurl:/intitle:/filetype:/intext:), "
+                        "false for broad research queries to prevent false snippet drops."
+                    ),
                 },
                 "allow_relax": {
                     "type": "boolean",
-                    "default": False,
-                    "description": "Allow progressive query relaxation if strict query returns zero matches.",
+                    "default": True,
+                    "description": "Allow progressive query relaxation if strict query returns zero matches (default true).",
                 },
                 "use_cache": {
                     "type": "boolean",
@@ -647,8 +723,8 @@ async def _handle_search_web_v3(args: dict[str, Any]) -> str:
         max_results=int(args.get("max_results", 10)),
         pagination_depth=int(args.get("pagination_depth", 1)),
         concurrency=1,
-        strict_ast=bool(args.get("strict_ast", True)),
-        allow_relax=bool(args.get("allow_relax", False)),
+        strict_ast=_auto_strict_ast(query, args.get("strict_ast")),
+        allow_relax=bool(args.get("allow_relax", True)),
         use_cache=bool(args.get("use_cache", True)),
         poisson_mean=0.25,
     )
@@ -668,7 +744,11 @@ async def _handle_search_web_v3(args: dict[str, Any]) -> str:
         render_live=False,
     )
     orch = SearchOrchestrator(settings, google_config=google_cfg, telemetry_sink=tracker)
-    output = await orch.execute_stream(_iter_queries([query]), total_hint=1)
+    _hydrate_registry_health(orch.registry)
+    try:
+        output = await orch.execute_stream(_iter_queries([query]), total_hint=1)
+    finally:
+        _persist_registry_health(orch.registry)
 
     exports_map: dict[str, str] = {}
     links_path: Path | None = None

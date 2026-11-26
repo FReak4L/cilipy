@@ -80,6 +80,15 @@ class ThompsonSamplingScheduler:
         with self._lock:
             self._arms.pop(arm_id, None)
 
+    def set_arm_params(self, arm_id: str, alpha: float, beta: float) -> None:
+        """Restore or seed Beta(alpha, beta) parameters for an arm in place."""
+        with self._lock:
+            state = self._arms.get(arm_id)
+            if state is None:
+                state = self.register_arm(arm_id)
+            state.alpha = max(1.0, float(alpha))
+            state.beta = max(1.0, float(beta))
+
     def get_arm(self, arm_id: str) -> BetaArmState:
         with self._lock:
             if arm_id not in self._arms:

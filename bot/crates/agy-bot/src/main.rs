@@ -378,6 +378,7 @@ async fn run_bridge() -> anyhow::Result<()> {
     let store = Arc::new(StateStore::open(cfg.state_path()).context("opening StateStore")?);
     let acl = Arc::new(
         AclStore::open(cfg.acl_path(), cfg.owner_id, &cfg.allowed_user_ids, 300)
+            .map(|acl| acl.with_extra_owners(&cfg.owner_ids))
             .context("opening AclStore")?,
     );
     let outbox = Arc::new(OutQueue::open(cfg.outbox_path()).context("opening OutQueue")?);
