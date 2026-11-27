@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agy-bot"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "agy-ext",
@@ -38,7 +38,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
- "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -46,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agy-core"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "hex",
  "rand 0.8.8",
@@ -63,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "agy-ext"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "bytes",
@@ -89,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "agy-mcp-gateway"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "agy-ext",
@@ -112,7 +111,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
- "tower-http 0.7.1",
  "tracing",
  "url",
  "uuid",
@@ -120,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "agy-net"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "axum",
@@ -139,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "agy-render"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "regex",
@@ -151,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "agy-widgets"
-version = "4.5.0"
+version = "4.6.0"
 dependencies = [
  "agy-core",
  "agy-render",
@@ -1363,7 +1361,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
- "tower-http 0.6.11",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -1815,24 +1813,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "url",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "bitflags",
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "percent-encoding",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
- "tracing",
 ]
 
 [[package]]

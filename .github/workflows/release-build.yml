@@ -5,6 +5,9 @@ on:
     tags:
       - "v*"
       - "cilipy-v*"
+  workflow_run:
+    workflows: ["Release Please"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,20 +18,67 @@ permissions:
   contents: write
 
 jobs:
+  resolve-tag:
+    name: Resolve Release Tag
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Determine release tag needing assets
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG="$(gh release list -R "$REPO" --limit 5 --json tagName,isDraft -q '[.[] | select(.isDraft == false)][0].tagName' || true)"
+          if [ -z "$TAG" ]; then
+            echo "No published release found — skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HAS_SUMS="$(gh release view "$TAG" -R "$REPO" --json assets -q '[.assets[].name] | any(. == "SHA256SUMS.txt")' || echo false)"
+          if [ "$HAS_SUMS" = "true" ]; then
+            echo "Release ${TAG} already has SHA256SUMS.txt — skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release ${TAG} lacks SHA256SUMS.txt — triggering CI/CD build & upload."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-publish:
     name: Build Linux Release & Checksums
+    needs: resolve-tag
+    if: needs.resolve-tag.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve-tag.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bot
       - name: Build release binary
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo build --release --manifest-path bot/Cargo.toml
       - name: Package release assets
         run: |
@@ -41,7 +91,7 @@ jobs:
       - name: Upload assets to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ inputs.tag || github.ref_name }}
+          TAG_NAME: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" \
@@ -59,7 +109,7 @@ jobs:
 
   notify-telegram:
     name: Optional Telegram Release Notice
-    needs: build-and-publish
+    needs: [resolve-tag, build-and-publish]
     runs-on: ubuntu-latest
     environment: production
     if: ${{ vars.ENABLE_TG_RELEASE_NOTIFY == 'true' }}
@@ -68,7 +118,7 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TG_RELEASE_BOT_TOKEN }}
           TG_CHAT: ${{ secrets.TG_RELEASE_CHAT_ID }}
-          REF_NAME: ${{ inputs.tag || github.ref_name }}
+          REF_NAME: ${{ needs.resolve-tag.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           if [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ]; then

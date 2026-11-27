@@ -136,7 +136,7 @@ class TestGoogleFourTiersStandalone(unittest.IsolatedAsyncioTestCase):
     async def test_all_four_tiers_instantiate_independently(self) -> None:
         cfg = GoogleSuiteConfig(
             cse_credentials=[
-                GoogleCSECredential(api_key="AIzaSyTestKey0001", cx="cx_0001", daily_quota_limit=5)
+                GoogleCSECredential(api_key="AIzaSyTestKey0001", cx="cx_0001", daily_quota_limit=5)  # gitleaks:allow
             ]
         )
         tiers = build_google_plugins(config=cfg)
@@ -154,14 +154,14 @@ class TestGoogleFourTiersStandalone(unittest.IsolatedAsyncioTestCase):
         pool = GoogleCSEKeyPool(
             [
                 GoogleCSECredential(
-                    api_key="AIzaSyKeyOne0001",
+                    api_key="AIzaSyKeyOne0001",  # gitleaks:allow
                     cx="cx_alpha_001",
                     daily_quota_limit=1,
                     used_today=1,
                     quota_reset_utc=past_ts,  # Expired boundary -> must reset to 0 on acquire
                 ),
                 GoogleCSECredential(
-                    api_key="AIzaSyKeyTwo0002",
+                    api_key="AIzaSyKeyTwo0002",  # gitleaks:allow
                     cx="cx_beta_002",
                     daily_quota_limit=1,
                 ),
