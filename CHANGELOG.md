@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.6.1](https://github.com/FReak4L/cilipy/compare/cilipy-v4.6.0...cilipy-v4.6.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* harden gitleaks secret rules, remove unused crate dep & automate release CI/CD ([8addcc3](https://github.com/FReak4L/cilipy/commit/8addcc31849df5db7a67d2c51d62f596de6c96ea))
+* harden gitleaks secret rules, remove unused crate dep & automate release CI/CD ([9546392](https://github.com/FReak4L/cilipy/commit/9546392ba1bd9b8770bab17e4375b895a2049d0f))
+
 ## [4.6.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.5.0...cilipy-v4.6.0) (2026-11-27)
 
 
