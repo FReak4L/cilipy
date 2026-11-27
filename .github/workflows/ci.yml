@@ -21,7 +21,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bot
-      - name: Run cargo test
+      - name: Run cargo test (warnings denied)
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo test --manifest-path bot/Cargo.toml
 
   python-search-v3:

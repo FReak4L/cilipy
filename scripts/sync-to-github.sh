@@ -81,8 +81,9 @@ if [ -z "$(git status --porcelain)" ]; then
 fi
 
 echo "[3/5] Running gitleaks secret scan & Rust tests..."
+rm -rf "${REPO_DIR}/bot/target"
 gitleaks detect --no-git -s "$REPO_DIR" -c "${REPO_DIR}/.gitleaks.toml" --redact
-cargo test --manifest-path "${REPO_DIR}/bot/Cargo.toml"
+CARGO_TARGET_DIR="${STACK_ROOT}/src/ch-base/target" cargo test --manifest-path "${REPO_DIR}/bot/Cargo.toml"
 
 echo "[4/5] Creating branch ${BRANCH} and committing..."
 git checkout -b "$BRANCH"

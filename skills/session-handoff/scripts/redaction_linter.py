@@ -254,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             "Token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
             "PASSWORD=hunter2supersecret\n"
             "Contact: jane.doe@example.com\n"
-            "URL: https://api.example.com/v1/data?token=abcdef1234567890\n"
+            "URL: https://api.example.com/v1/data?token=abcdef1234567890\n"  # gitleaks:allow
             "Allowed: AKIAIOSFODNN7EXAMPLE <!-- handoff:allow secret -->\n"
         )
         report = scan_text(fixture)
