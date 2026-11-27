@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.6.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.5.0...cilipy-v4.6.0) (2026-11-27)
+
+
+### Features
+
+* fix multi-owner concurrency/ACL/security, add priority+burst scheduler & native quota cockpit ([8c24cdd](https://github.com/FReak4L/cilipy/commit/8c24cdd40d67c856ad751667d31192f7d70bd510))
+* fix multi-owner concurrency/ACL/security, add priority+burst scheduler & native quota cockpit ([c283688](https://github.com/FReak4L/cilipy/commit/c283688eeab18f0ca721a125f8e3eabdbde3985e))
+
 ## [4.5.0](https://github.com/FReak4L/cilipy/compare/cilipy-v4.4.1...cilipy-v4.5.0) (2026-11-26)
 
 
