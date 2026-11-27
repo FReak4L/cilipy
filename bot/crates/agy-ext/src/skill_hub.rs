@@ -8,7 +8,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use agy_core::atomic::atomic_write_json;
 use agy_core::error::{BridgeError, Result};
@@ -205,7 +205,7 @@ pub fn remove_source(state_dir: &Path, id: &str) -> Result<bool> {
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    agy_core::text::now_unix()
 }
 
 async fn git(dir: Option<&Path>, args: &[&str]) -> std::result::Result<String, String> {

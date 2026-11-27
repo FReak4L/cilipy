@@ -200,7 +200,7 @@ pub fn help_text_for(ctx: &BotCtx, uid: i64) -> String {
 
     if is_owner {
         sections.push(format!(
-            "\n<b>{}</b>\n/users · /accounts · /proxies · /secretary",
+            "\n<b>{}</b>\n/users · /accounts · /quota · /limits · /proxies · /secretary",
             t(lang, Tx::HelpSecOwner)
         ));
     }
@@ -378,10 +378,11 @@ pub async fn show_status(ctx: &Arc<BotCtx>, cq: Option<&CallbackQuery>, chat_id:
         (
             "Active jobs",
             format!(
-                "{} (global {}/{})",
+                "{} (global {}/{}, queued {})",
                 ctx.jobs.active_count(),
                 ctx.jobs.active_global_jobs(),
-                ctx.jobs.max_global_jobs()
+                ctx.jobs.max_global_jobs(),
+                ctx.jobs.queued_global_jobs(),
             ),
         ),
         (
@@ -451,6 +452,11 @@ pub async fn show_limits(ctx: &Arc<BotCtx>, cq: Option<&CallbackQuery>, chat_id:
     } else {
         format!("{}/min (owner 3x · nav 3x)", lim.tg_user_rl_per_min)
     };
+    let ai_burst_str = if lim.ai_burst_per_min == 0 {
+        "off".to_string()
+    } else {
+        format!("{}/min (burst {})", lim.ai_burst_per_min, lim.ai_burst_cap)
+    };
     let md = format!(
         "### {} Runtime Limits & AI Safety Guards\n\
         > Live AI safety, queue & flood controls synced across `JobManager`, `Parallel`, `Secretary` & Telegram (persisted in `state.json`). Guard knobs stay active within safe bounds.\n\n\
@@ -462,6 +468,7 @@ pub async fn show_limits(ctx: &Arc<BotCtx>, cq: Option<&CallbackQuery>, chat_id:
         | Job Timeout | `{} min` |\n\
         | Global Concurrent Jobs | `{}` (live max) |\n\
         | User Pending Queue Cap | `{}` per user |\n\
+        | AI Job Burst Limiter | `{ai_burst_str}` |\n\
         | Telegram User Anti-Flood | `{rl_str}` |\n\
         | HTTP Rate / Concurrency | `{}/min` · `{}` slots |\n\
         | Outbox Secret Scanner | `{}` |",
@@ -497,14 +504,17 @@ pub async fn show_limits(ctx: &Arc<BotCtx>, cq: Option<&CallbackQuery>, chat_id:
         ],
         vec![
             ctx.btn("", &format!("TG Flood: {}", if lim.tg_user_rl_per_min == 0 { "off".to_string() } else { format!("{}/m", lim.tg_user_rl_per_min) }), Some("lim:rl"), None, None),
+            ctx.btn("", &format!("AI Burst: {}", if lim.ai_burst_per_min == 0 { "off".to_string() } else { format!("{}/m·{}", lim.ai_burst_per_min, lim.ai_burst_cap) }), Some("lim:aiburst"), None, None),
+        ],
+        vec![
             ctx.btn("", &format!("Secret Scan: {}", if lim.outbox_secret_scan { "ON" } else { "OFF" }), Some("lim:scan"), None, None),
-        ],
-        vec![
             ctx.btn("bolt", "Safety Policy ›", Some("acct:pol"), Some("primary"), None),
-            ctx.btn("refresh", "Reset Defaults", Some("lim:reset"), None, None),
         ],
         vec![
+            ctx.btn("refresh", "Reset Defaults", Some("lim:reset"), None, None),
             ctx.btn("status", "Status", Some("status"), None, None),
+        ],
+        vec![
             ctx.btn("back", "Menu", Some("home:2"), None, None),
         ],
     ];
@@ -1811,6 +1821,7 @@ pub async fn handle_system_cb(
                     lim.tg_user_rl_per_min = 20;
                     lim.outbox_secret_scan = true;
                     ctx.tg_rl.set_rate(20, 20);
+                    ctx.tg_nav_rl.set_rate(60, 60);
                     "Strict AI Safety profile active".to_string()
                 }
                 "prof:std" => {
@@ -1823,6 +1834,7 @@ pub async fn handle_system_cb(
                     lim.tg_user_rl_per_min = 30;
                     lim.outbox_secret_scan = true;
                     ctx.tg_rl.set_rate(30, 30);
+                    ctx.tg_nav_rl.set_rate(90, 90);
                     "Standard Safe limits applied".to_string()
                 }
                 "prof:high" => {
@@ -1835,6 +1847,7 @@ pub async fn handle_system_cb(
                     lim.tg_user_rl_per_min = 60;
                     lim.outbox_secret_scan = true;
                     ctx.tg_rl.set_rate(60, 60);
+                    ctx.tg_nav_rl.set_rate(180, 180);
                     "Extended guarded limits applied".to_string()
                 }
                 "steps" => {
@@ -1903,7 +1916,24 @@ pub async fn handle_system_cb(
                     };
                     let burst = lim.tg_user_rl_per_min.clamp(20, 60);
                     ctx.tg_rl.set_rate(lim.tg_user_rl_per_min, burst);
+                    ctx.tg_nav_rl.set_rate(lim.tg_user_rl_per_min.saturating_mul(3), burst.saturating_mul(3));
                     format!("TG anti-flood: {}/m", lim.tg_user_rl_per_min)
+                }
+                "aiburst" => {
+                    let (r, c) = match lim.ai_burst_per_min {
+                        0 => (4, 2),
+                        1..=4 => (6, 4),
+                        5..=8 => (12, 6),
+                        9..=15 => (20, 10),
+                        _ => (0, 4),
+                    };
+                    lim.ai_burst_per_min = r;
+                    lim.ai_burst_cap = c;
+                    if r == 0 {
+                        "AI job burst limiter: off".to_string()
+                    } else {
+                        format!("AI job burst: {r}/m (cap {c})")
+                    }
                 }
                 "scan" => {
                     lim.outbox_secret_scan = !lim.outbox_secret_scan;
@@ -1917,6 +1947,10 @@ pub async fn handle_system_cb(
                         lim.tg_user_rl_per_min.clamp(20, 60)
                     };
                     ctx.tg_rl.set_rate(lim.tg_user_rl_per_min, burst);
+                    ctx.tg_nav_rl.set_rate(
+                        lim.tg_user_rl_per_min.saturating_mul(3),
+                        burst.saturating_mul(3),
+                    );
                     "Limits reset to defaults".to_string()
                 }
                 _ => "Updated".to_string(),

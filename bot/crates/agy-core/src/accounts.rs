@@ -55,6 +55,8 @@ pub const PER_ACCOUNT_ENTRIES: &[&str] = &[
     "jetbox_summaries_proto.pb",
     "history.jsonl",
     "implicit",
+    "annotations",
+    "bin",
 ];
 
 fn now_ts() -> i64 {
@@ -1252,13 +1254,33 @@ fn ensure_link(link: &Path, target: &Path) -> Result<()> {
             if fs::read_link(link).ok().as_deref() == Some(target) {
                 return Ok(());
             }
-            fs::remove_file(link).map_err(|e| BridgeError::io(link.display().to_string(), e))?;
+            // Atomic symlink swap via sibling temp link + rename (no ENOENT race window).
+            static TMP_LINK_SEQ: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let seq = TMP_LINK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let parent = link.parent().unwrap_or_else(|| Path::new("."));
+            let tmp = parent.join(format!(
+                ".{}.tmp-link-{}-{}",
+                link.file_name().and_then(|n| n.to_str()).unwrap_or("lnk"),
+                std::process::id(),
+                seq
+            ));
+            let _ = fs::remove_file(&tmp);
+            symlink(target, &tmp).map_err(|e| BridgeError::io(tmp.display().to_string(), e))?;
+            if let Err(e) = fs::rename(&tmp, link) {
+                let _ = fs::remove_file(&tmp);
+                return Err(BridgeError::io(link.display().to_string(), e));
+            }
+            return Ok(());
         }
         Ok(_) => return Ok(()), // real file/dir present: account-local, never clobber
         Err(_) => {}
     }
-    symlink(target, link).map_err(|e| BridgeError::io(link.display().to_string(), e))?;
-    Ok(())
+    match symlink(target, link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(BridgeError::io(link.display().to_string(), e)),
+    }
 }
 
 /// Build or refresh a shadow `HOME` for an extra account.
@@ -1962,7 +1984,12 @@ impl AccountStore {
     /// 1. respects pool safety breaker, weekly 1% reserve, and `max_concurrency_per_account`;
     /// 2. user's sticky account when healthy and below `prefer_fresher_pct` (or no fresher account exists);
     /// 3. otherwise least-loaded / freshest weekly usage / lowest pacing wait / priority.
-    pub fn pick_with_filter<F>(&self, uid: i64, exclude: &HashSet<String>, allow: F) -> Option<Account>
+    fn pick_with_filter_deferred<F>(
+        &self,
+        uid: i64,
+        exclude: &HashSet<String>,
+        allow: F,
+    ) -> (Option<Account>, Vec<String>)
     where
         F: Fn(&Account) -> bool,
     {
@@ -1970,7 +1997,7 @@ impl AccountStore {
         let (cands, sticky, policy) = {
             let g = self.read();
             if g.breaker.active_at(now).is_some() {
-                return None;
+                return (None, Vec::new());
             }
             let pol = g.policy.clone();
             let c: Vec<Account> = g
@@ -1982,21 +2009,18 @@ impl AccountStore {
             (c, g.affinity.get(&uid.to_string()).cloned(), pol)
         };
         let mut usable = Vec::new();
+        let mut missing_tokens = Vec::new();
         for a in cands {
-            if !a.is_primary() && !matches!(inspect_token(&a.token_path()), TokenState::Present { .. }) {
-                let c = Classified {
-                    class: FailureClass::AuthInvalid,
-                    action: FailureAction::Disable,
-                    reset_secs: None,
-                    quota_scope: None,
-                };
-                self.record_failure(&a.id, &c, "sign-in token missing");
+            let bad_tok =
+                !a.is_primary() && !matches!(inspect_token(&a.token_path()), TokenState::Present { .. });
+            if bad_tok {
+                missing_tokens.push(a.id.clone());
                 continue;
             }
             usable.push(a);
         }
         if usable.is_empty() {
-            return None;
+            return (None, missing_tokens);
         }
         let load = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
         let max_conc = policy.max_concurrency_per_account.max(1);
@@ -2005,15 +2029,19 @@ impl AccountStore {
             .filter(|a| *load.get(&a.id).unwrap_or(&0) < max_conc)
             .cloned()
             .collect();
-        if !under_cap.is_empty() {
-            usable = under_cap;
-        } else if policy.preset == AccountPolicyPreset::StrictSafe && max_conc == 1 {
-            // In strict_safe single-concurrency mode, refuse piling a second live job onto a busy account.
-            return None;
+        if under_cap.is_empty() {
+            // Strictly enforce `max_concurrency_per_account` across BOTH StrictSafe and Balanced presets.
+            return (None, missing_tokens);
         }
+        usable = under_cap;
 
         if let Some(s) = sticky {
             if let Some(a) = usable.iter().find(|a| a.id == s) {
+                let sticky_inf = *load.get(&a.id).unwrap_or(&0);
+                let has_idle_peer = sticky_inf > 0
+                    && usable.iter().any(|other| {
+                        other.id != a.id && *load.get(&other.id).unwrap_or(&0) == 0
+                    });
                 let sticky_pct = a.usage.weekly_used_pct_at(now, &policy).unwrap_or(0.0);
                 let has_much_fresher = sticky_pct >= policy.prefer_fresher_pct
                     && usable.iter().any(|other| {
@@ -2022,8 +2050,8 @@ impl AccountStore {
                                 + 5.0
                                 < sticky_pct
                     });
-                if !has_much_fresher {
-                    return Some(a.clone());
+                if !has_idle_peer && !has_much_fresher {
+                    return (Some(a.clone()), missing_tokens);
                 }
             }
         }
@@ -2034,10 +2062,35 @@ impl AccountStore {
                 .weekly_used_pct_at(now, &policy)
                 .map(|p| (p / 10.0).floor().clamp(0.0, 10.0) as u32)
                 .unwrap_or(0);
+            let five_h_bucket = (a.usage.tokens_5h / 500_000).min(100) as u32;
             let wait_s = a.usage.pacing_wait_at(now, &policy, a.health.consecutive_failures);
-            (inf, wk_bucket, wait_s > 0, a.priority, a.created_ts)
+            (inf, wk_bucket, wait_s > 0, a.priority, five_h_bucket, a.created_ts)
         });
-        usable.into_iter().next()
+        (usable.into_iter().next(), missing_tokens)
+    }
+
+    fn disable_missing_tokens(&self, missing_ids: Vec<String>) {
+        if missing_ids.is_empty() {
+            return;
+        }
+        let c = Classified {
+            class: FailureClass::AuthInvalid,
+            action: FailureAction::Disable,
+            reset_secs: None,
+            quota_scope: None,
+        };
+        for id in missing_ids {
+            self.record_failure(&id, &c, "sign-in token missing");
+        }
+    }
+
+    pub fn pick_with_filter<F>(&self, uid: i64, exclude: &HashSet<String>, allow: F) -> Option<Account>
+    where
+        F: Fn(&Account) -> bool,
+    {
+        let (picked, missing) = self.pick_with_filter_deferred(uid, exclude, allow);
+        self.disable_missing_tokens(missing);
+        picked
     }
 
     /// Choose an account for `uid`, skipping `exclude`.
@@ -2047,27 +2100,55 @@ impl AccountStore {
 
     /// The account `uid` would most likely run on next, without side effects:
     /// its sticky account when usable, otherwise the best available by priority.
-    pub fn preferred_for(&self, uid: i64) -> Option<Account> {
+    /// The account `uid` would most likely run on next, without side effects, enforcing
+    /// token presence and the caller's `allow` predicate (e.g. fail-closed proxy health).
+    pub fn preferred_for_with_filter<F>(&self, uid: i64, allow: F) -> Option<Account>
+    where
+        F: Fn(&Account) -> bool,
+    {
         let now = now_ts();
-        let g = self.read();
-        if g.breaker.active_at(now).is_some() {
-            return None;
-        }
-        let pol = &g.policy;
-        let usable: Vec<&Account> = g
-            .accounts
-            .iter()
-            .filter(|a| a.available_at_with_policy(now, pol))
+        let (cands, sticky) = {
+            let g = self.read();
+            if g.breaker.active_at(now).is_some() {
+                return None;
+            }
+            let pol = &g.policy;
+            let c: Vec<Account> = g
+                .accounts
+                .iter()
+                .filter(|a| a.available_at_with_policy(now, pol) && allow(a))
+                .cloned()
+                .collect();
+            (c, g.affinity.get(&uid.to_string()).cloned())
+        };
+        let mut usable: Vec<Account> = cands
+            .into_iter()
+            .filter(|a| {
+                a.is_primary() || matches!(inspect_token(&a.token_path()), TokenState::Present { .. })
+            })
             .collect();
-        if let Some(s) = g.affinity.get(&uid.to_string()) {
-            if let Some(a) = usable.iter().find(|a| &a.id == s) {
-                return Some((*a).clone());
+        let load = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = sticky {
+            if let Some(a) = usable.iter().find(|a| a.id == s) {
+                let s_inf = *load.get(&a.id).unwrap_or(&0);
+                let has_idle = s_inf > 0
+                    && usable.iter().any(|o| o.id != a.id && *load.get(&o.id).unwrap_or(&0) == 0);
+                if !has_idle {
+                    return Some(a.clone());
+                }
             }
         }
-        let load = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
-        let mut v = usable;
-        v.sort_by_key(|a| (*load.get(&a.id).unwrap_or(&0), a.priority, a.created_ts));
-        v.first().map(|a| (*a).clone())
+        usable.sort_by_key(|a| (*load.get(&a.id).unwrap_or(&0), a.priority, a.created_ts));
+        usable.into_iter().next()
+    }
+
+    pub fn preferred_for(&self, uid: i64) -> Option<Account> {
+        self.preferred_for_with_filter(uid, |_| true)
+    }
+
+    /// Snapshot of currently active in-flight counts per account ID.
+    pub fn active_in_flight_snapshot(&self) -> HashMap<String, u32> {
+        self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Other accounts signed in with the same e-mail (case-insensitive) as `id`.
@@ -2100,10 +2181,17 @@ impl AccountStore {
     where
         F: Fn(&Account) -> bool,
     {
-        let _serial = self.pick_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let a = self.pick_with_filter(uid, exclude, allow)?;
-        self.begin(&a.id);
-        Some(a)
+        let (picked, missing) = {
+            let _serial = self.pick_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let (a, missing) = self.pick_with_filter_deferred(uid, exclude, allow);
+            if let Some(ref acc) = a {
+                self.begin(&acc.id);
+            }
+            (a, missing)
+        };
+        // Persist any missing-token failures AFTER releasing `pick_lock` (never fsync under lock).
+        self.disable_missing_tokens(missing);
+        picked
     }
 
     /// Pick a specific pinned account under `pick_lock`, strictly enforcing breaker,
@@ -2133,14 +2221,11 @@ impl AccountStore {
         if !acc.available_at_with_policy(now, &pol) || !allow(&acc) {
             return None;
         }
-        if !acc.is_primary() && !matches!(inspect_token(&acc.token_path()), TokenState::Present { .. }) {
-            let c = Classified {
-                class: FailureClass::AuthInvalid,
-                action: FailureAction::Disable,
-                reset_secs: None,
-                quota_scope: None,
-            };
-            self.record_failure(&acc.id, &c, "sign-in token missing");
+        let bad_tok =
+            !acc.is_primary() && !matches!(inspect_token(&acc.token_path()), TokenState::Present { .. });
+        if bad_tok {
+            drop(_serial);
+            self.disable_missing_tokens(vec![acc.id.clone()]);
             return None;
         }
         let max_conc = pol.max_concurrency_per_account.max(1);
@@ -2168,14 +2253,26 @@ impl AccountStore {
     where
         F: Fn(&Account) -> bool,
     {
-        let _serial = self.pick_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ex = exclude.clone();
-        ex.extend(avoid.iter().cloned());
-        let a = self
-            .pick_with_filter(uid, &ex, &allow)
-            .or_else(|| self.pick_with_filter(uid, exclude, &allow))?;
-        self.begin(&a.id);
-        Some(a)
+        let (picked, missing) = {
+            let _serial = self.pick_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ex = exclude.clone();
+            ex.extend(avoid.iter().cloned());
+            let (a1, mut missing) = self.pick_with_filter_deferred(uid, &ex, &allow);
+            let a = match a1 {
+                Some(acc) => Some(acc),
+                None => {
+                    let (a2, m2) = self.pick_with_filter_deferred(uid, exclude, &allow);
+                    missing.extend(m2);
+                    a2
+                }
+            };
+            if let Some(ref acc) = a {
+                self.begin(&acc.id);
+            }
+            (a, missing)
+        };
+        self.disable_missing_tokens(missing);
+        picked
     }
 
     /// Like [`pick_begin`](Self::pick_begin) but prefers an account **not** in `avoid` (e.g. the
@@ -2674,5 +2771,48 @@ mod tests {
             s.breaker_status().is_none(),
             "reset_health must purge stale incident from breaker window so next failure doesn't false-trip"
         );
+    }
+
+    #[test]
+    fn multi_owner_concurrency_strict_cap_idle_beats_sticky_and_preferred_filter() {
+        let dir = TempDir::new().unwrap();
+        let (s, _primary) = store(&dir);
+        let a2 = s.add_slot("acc2").unwrap();
+        fs::write(a2.token_path(), r#"{"token":{"refresh_token":"r2"}}"#).unwrap();
+        s.finish_login(&a2.id).unwrap();
+
+        // Balanced preset with max_concurrency_per_account = 2 must strictly refuse a 3rd pick
+        let mut pol = AccountPolicy::balanced();
+        pol.max_concurrency_per_account = 2;
+        s.set_policy(pol).unwrap();
+
+        // Owner1 succeeds on primary (sticky to primary)
+        s.record_success(PRIMARY_ACCOUNT_ID, Some(101));
+        // Primary is busy (1 in-flight), acc2 is idle (0 in-flight): idle acc2 beats busy sticky primary
+        let p1 = s.pick_begin(101, &HashSet::new()).unwrap();
+        assert_eq!(p1.id, PRIMARY_ACCOUNT_ID);
+        let p2 = s.pick_begin(101, &HashSet::new()).unwrap();
+        assert_eq!(p2.id, a2.id, "idle account should beat busy sticky account");
+
+        // Fill both accounts to max_concurrency = 2 -> next pick MUST return None (no silent over-cap pileup)
+        let p3 = s.pick_begin(202, &HashSet::new()).unwrap();
+        let p4 = s.pick_begin(202, &HashSet::new()).unwrap();
+        assert_eq!(s.in_flight(&p1.id), 2);
+        assert_eq!(s.in_flight(&p2.id), 2);
+        assert_ne!(p3.id, p4.id);
+        assert!(
+            s.pick_begin(303, &HashSet::new()).is_none(),
+            "Balanced preset must strictly enforce max_concurrency_per_account"
+        );
+        for id in [&p1.id, &p2.id, &p3.id, &p4.id] {
+            s.end(id);
+        }
+
+        // preferred_for_with_filter skips accounts blocked by proxy filter or missing tokens
+        s.set_account_proxy(PRIMARY_ACCOUNT_ID, Some("blocked-px")).unwrap();
+        let pref = s
+            .preferred_for_with_filter(101, |a| a.proxy_id.as_deref() != Some("blocked-px"))
+            .unwrap();
+        assert_eq!(pref.id, a2.id, "preferred_for_with_filter must skip blocked sticky proxy");
     }
 }

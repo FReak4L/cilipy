@@ -83,8 +83,10 @@ pub struct BotCtx {
     models_mtime: std::sync::Mutex<Option<SystemTime>>,
     pub sk_view: DashMap<i64, SkillViewState>,
     pub commands_set: DashMap<i64, bool>,
-    /// Phase 3 per-UID Telegram anti-flood limiter (commands, callbacks, messages, uploads).
+    /// Phase 3 per-UID Telegram anti-flood limiter (commands, messages, uploads).
     pub tg_rl: Arc<KeyedTokenBucket<i64>>,
+    /// Dedicated UI panel navigation anti-flood limiter (prevents mixed-scale interference on `tg_rl`).
+    pub tg_nav_rl: Arc<KeyedTokenBucket<i64>>,
     /// Last timestamp a rate-limit notice was sent to `uid` (throttled to <= 1 per 30s).
     pub tg_rl_notice_ts: DashMap<i64, f64>,
     /// Phase 4 short-TTL (30s) cache for `agy mcp list` rows keyed by optional uid (avoids repeated CLI spawns).
@@ -140,6 +142,11 @@ impl BotCtx {
             tg_burst,
             DEFAULT_MAX_BUCKET_KEYS,
         ));
+        let tg_nav_rl = Arc::new(KeyedTokenBucket::new(
+            rl_per_min.saturating_mul(3),
+            tg_burst.saturating_mul(3),
+            DEFAULT_MAX_BUCKET_KEYS,
+        ));
 
         Arc::new(Self {
             cfg,
@@ -165,6 +172,7 @@ impl BotCtx {
             sk_view: DashMap::new(),
             commands_set: DashMap::new(),
             tg_rl,
+            tg_nav_rl,
             tg_rl_notice_ts: DashMap::new(),
             mcp_rows_cache: DashMap::new(),
             mcp_gw: std::sync::OnceLock::new(),
@@ -181,6 +189,22 @@ impl BotCtx {
 
     pub fn is_owner(&self, uid: i64) -> bool {
         self.acl.is_owner(uid)
+    }
+
+    pub fn owner_ids(&self) -> Vec<i64> {
+        self.acl.owner_ids()
+    }
+
+    pub async fn broadcast_owners_html(&self, html: &str, mk: Option<InlineKeyboardMarkup>) {
+        for oid in self.owner_ids() {
+            let _ = self.render.send_html_simple(oid, html, mk.clone()).await;
+        }
+    }
+
+    pub async fn broadcast_owners_rich(&self, md: &str, mk: Option<InlineKeyboardMarkup>) {
+        for oid in self.owner_ids() {
+            let _ = self.render.send_rich_card_message(oid, md, mk.clone()).await;
+        }
     }
 
     pub fn is_admin(&self, uid: i64) -> bool {
@@ -595,8 +619,11 @@ impl BotCtx {
                     ),
                 ]);
                 rows.push(vec![
-                    self.btn("status", t(lang, Tx::BtnStatus), Some("status"), None, None),
+                    self.btn("status", "📊 Quota Cockpit", Some("quota"), Some("primary"), None),
                     self.btn("", "🛡 Updates", Some("upd:status"), None, None),
+                ]);
+                rows.push(vec![
+                    self.btn("status", t(lang, Tx::BtnStatus), Some("status"), None, None),
                 ]);
             }
         }
@@ -711,11 +738,40 @@ impl BotCtx {
 
     /// Refresh model catalog from `agy models`, saving `$STATE_DIR/models.json` atomically.
     pub async fn refresh_models(&self) -> Vec<ModelInfo> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(pool) = self.jobs.accounts() {
+            if let Some(primary) = pool.get(agy_core::accounts::PRIMARY_ACCOUNT_ID) {
+                match self.proxies.resolve(primary.proxy_id.as_deref()) {
+                    ResolvedProxy::Blocked { .. } => return self.get_models_cache(),
+                    ResolvedProxy::Use { url, .. } => {
+                        for k in [
+                            "HTTPS_PROXY",
+                            "HTTP_PROXY",
+                            "ALL_PROXY",
+                            "https_proxy",
+                            "http_proxy",
+                            "all_proxy",
+                        ] {
+                            env.push((k.to_string(), url.clone()));
+                        }
+                        for k in ["NO_PROXY", "no_proxy"] {
+                            env.push((k.to_string(), "127.0.0.1,localhost,::1".to_string()));
+                        }
+                    }
+                    ResolvedProxy::Direct | ResolvedProxy::DirectFallback { .. } => {}
+                }
+            }
+        }
         let args = vec![
             self.cfg.agy_bin.to_string_lossy().into_owned(),
             "models".to_string(),
         ];
-        if let Ok((rc, out, _)) = run_cmd(&args, Some(&self.cfg.agy_workspace), 45.0).await {
+        let res = if env.is_empty() {
+            run_cmd(&args, Some(&self.cfg.agy_workspace), 45.0).await
+        } else {
+            agy_ext::engines::run_cmd_env(&args, Some(&self.cfg.agy_workspace), 45.0, &env).await
+        };
+        if let Ok((rc, out, _)) = res {
             if rc == 0 {
                 let models = parse_models(&out);
                 if !models.is_empty() {
@@ -737,7 +793,12 @@ impl BotCtx {
         let Some(pool) = self.jobs.accounts() else {
             return (None, self.get_models_cache());
         };
-        let Some(a) = pool.preferred_for(uid) else {
+        let Some(a) = pool.preferred_for_with_filter(uid, |a| {
+            !matches!(
+                self.proxies.resolve(a.proxy_id.as_deref()),
+                ResolvedProxy::Blocked { .. }
+            )
+        }) else {
             return (None, self.get_models_cache());
         };
         let ms = crate::models_pool::load(&self.cfg.state_dir, &a.id);
@@ -750,7 +811,14 @@ impl BotCtx {
     /// Refresh the catalog of the user's active account (and the global cache when that is
     /// the primary account). No model request / quota: `agy models` only lists.
     pub async fn refresh_models_for_user(&self, uid: i64) -> Vec<ModelInfo> {
-        let acct = self.jobs.accounts().and_then(|p| p.preferred_for(uid));
+        let acct = self.jobs.accounts().and_then(|p| {
+            p.preferred_for_with_filter(uid, |a| {
+                !matches!(
+                    self.proxies.resolve(a.proxy_id.as_deref()),
+                    ResolvedProxy::Blocked { .. }
+                )
+            })
+        });
         let key = acct.as_ref().map(|a| a.id.clone()).unwrap_or_else(|| "primary".into());
         if !crate::models_pool::may_refresh_now(&key, self.acl.is_owner(uid)) {
             return self.models_for_user(uid).1;
@@ -768,7 +836,15 @@ impl BotCtx {
                 }
                 ms
             }
-            None => self.refresh_models().await,
+            None => {
+                if self.jobs.accounts().is_some() {
+                    // Pool exists, yet every account is disabled or fail-closed proxy blocked.
+                    // Never fall open to an unproxied `agy models` call.
+                    self.models_for_user(uid).1
+                } else {
+                    self.refresh_models().await
+                }
+            }
         }
     }
 
@@ -1037,7 +1113,12 @@ impl BotCtx {
             match self.jobs.accounts() {
                 Some(p) => {
                     let cur = p
-                        .preferred_for(uid)
+                        .preferred_for_with_filter(uid, |a| {
+                            !matches!(
+                                self.proxies.resolve(a.proxy_id.as_deref()),
+                                ResolvedProxy::Blocked { .. }
+                            )
+                        })
                         .map(|a| a.display_name())
                         .unwrap_or_else(|| "none".into());
                     let px_ok = self.proxies.healthy_count();
@@ -1271,6 +1352,7 @@ impl BotCtx {
         if is_owner {
             cmds.push(mk("users"));
             cmds.push(mk("accounts"));
+            cmds.push(mk("quota"));
             cmds.push(mk("proxies"));
             cmds.push(mk("secretary"));
             cmds.push(mk("updates"));
@@ -1379,7 +1461,18 @@ pub(crate) async fn agy_cmd_as(
 ) -> agy_core::Result<(i32, String, String)> {
     let mut args = vec![bin.to_string_lossy().into_owned()];
     args.extend(sub.iter().map(|s| s.to_string()));
-    let acct = uid.and_then(|u| pool.and_then(|p| p.preferred_for(u)));
+    let acct = uid
+        .and_then(|u| {
+            pool.and_then(|p| {
+                p.preferred_for_with_filter(u, |a| {
+                    proxies.is_none_or(|reg| {
+                        !matches!(reg.resolve(a.proxy_id.as_deref()), ResolvedProxy::Blocked { .. })
+                    })
+                })
+                .or_else(|| p.preferred_for(u))
+            })
+        })
+        .or_else(|| pool.and_then(|p| p.get(agy_core::accounts::PRIMARY_ACCOUNT_ID)));
     match (pool, acct) {
         (Some(p), Some(a)) => {
             let mut env: Vec<(String, String)> = Vec::new();
@@ -1390,13 +1483,22 @@ pub(crate) async fn agy_cmd_as(
                 env.push(("HOME".to_string(), a.home.to_string_lossy().into_owned()));
             }
             if let Some(reg) = proxies {
-                if let ResolvedProxy::Use { url, .. } = reg.resolve(a.proxy_id.as_deref()) {
-                    for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
-                        env.push((k.to_string(), url.clone()));
+                match reg.resolve(a.proxy_id.as_deref()) {
+                    ResolvedProxy::Blocked { reason, .. } => {
+                        return Err(agy_core::BridgeError::Network(format!(
+                            "Account '{}' sticky proxy is blocked (fail-closed): {reason}",
+                            a.id
+                        )));
                     }
-                    for k in ["NO_PROXY", "no_proxy"] {
-                        env.push((k.to_string(), "127.0.0.1,localhost,::1".to_string()));
+                    ResolvedProxy::Use { url, .. } => {
+                        for k in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
+                            env.push((k.to_string(), url.clone()));
+                        }
+                        for k in ["NO_PROXY", "no_proxy"] {
+                            env.push((k.to_string(), "127.0.0.1,localhost,::1".to_string()));
+                        }
                     }
+                    ResolvedProxy::Direct | ResolvedProxy::DirectFallback { .. } => {}
                 }
             }
             if env.is_empty() {
@@ -1681,5 +1783,42 @@ mod tests {
         let snap = ctx.sys_snapshot(1000000001);
         assert_eq!(snap["service"], "active");
         assert!(snap["polling"]["mode"].is_string());
+    }
+
+    #[tokio::test]
+    async fn agy_cmd_as_refuses_direct_egress_when_sticky_proxy_blocked() {
+        let td = TempDir::new().unwrap();
+        let ws = td.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let pool = agy_core::accounts::AccountStore::open(
+            td.path().join("accounts.json"),
+            td.path().join("accounts"),
+            td.path(),
+        )
+        .unwrap();
+        let proxies = agy_core::proxies::ProxyRegistry::open(
+            td.path().join("proxies.json"),
+            agy_core::proxies::ProxyFallbackPolicy::FailClosed,
+        )
+        .unwrap();
+        let px = proxies
+            .add("http://127.0.0.1:1", "dead-px")
+            .unwrap();
+        proxies.set_enabled(&px.id, false).unwrap();
+        pool.set_account_proxy("primary", Some(&px.id)).unwrap();
+
+        let res = agy_cmd_as(
+            Path::new("/bin/echo"),
+            &ws,
+            Some(&pool),
+            Some(&proxies),
+            Some(1001),
+            &["should-never-run"],
+            5.0,
+        )
+        .await;
+        assert!(res.is_err(), "agy_cmd_as must fail closed when sticky proxy is blocked");
+        let msg = res.unwrap_err().to_string();
+        assert!(msg.contains("fail-closed"), "unexpected error: {msg}");
     }
 }

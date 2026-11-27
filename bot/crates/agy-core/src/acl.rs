@@ -101,10 +101,7 @@ pub const ROLE_PRESETS: [(&str, Perms); 3] = [
 ];
 
 fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    crate::text::now_secs()
 }
 
 /// User approval lifecycle status.
@@ -573,16 +570,34 @@ impl AclStore {
         seed_allowed: &[i64],
         start_notify_cooldown: u64,
     ) -> Result<Self> {
+        Self::open_with_owners(path, owner_id, &[], seed_allowed, start_notify_cooldown)
+    }
+
+    /// Opens `acl.json` enforcing owner immunity for both primary `owner_id` and `extra_owners`
+    /// during initial load/sanitization so secondary owners are never demoted on boot.
+    pub fn open_with_owners(
+        path: impl Into<PathBuf>,
+        owner_id: i64,
+        extra_owners: &[i64],
+        seed_allowed: &[i64],
+        start_notify_cooldown: u64,
+    ) -> Result<Self> {
         let path = path.into();
         let now = now_secs();
-        let (inner, dirty) = load_and_sanitize(&path, owner_id, seed_allowed, now)?;
+        let mut owner_ids = HashSet::from([owner_id]);
+        for &uid in extra_owners {
+            if uid > 0 {
+                owner_ids.insert(uid);
+            }
+        }
+        let (inner, dirty) = load_and_sanitize(&path, owner_id, &owner_ids, seed_allowed, now)?;
         if dirty {
             atomic_write_json(&path, &inner.data, true)?;
         }
         Ok(Self {
             path,
             owner_id,
-            owner_ids: HashSet::from([owner_id]),
+            owner_ids,
             start_notify_cooldown,
             max_pending: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PENDING_USERS),
             inner: RwLock::new(inner),
@@ -606,7 +621,9 @@ impl AclStore {
                 }
                 let key = uid.to_string();
                 let needs_init = guard.data.users.get(&key).is_none_or(|u| {
-                    u.status != UserStatus::Approved || u.tier() != RoleTier::Owner
+                    u.status != UserStatus::Approved
+                        || u.tier() != RoleTier::Owner
+                        || u.perms != Perms::owner()
                 });
                 if needs_init {
                     let entry = guard.data.users.entry(key).or_insert_with(|| AclUser {
@@ -634,6 +651,10 @@ impl AclStore {
                     guard.data.selected.retain(|&x| x != uid);
                     dirty = true;
                 }
+                if guard.data.suppressed_seeds.iter().any(|&x| x == uid) {
+                    guard.data.suppressed_seeds.retain(|&x| x != uid);
+                    dirty = true;
+                }
             }
             if dirty {
                 let _ = atomic_write_json(&self.path, &guard.data, true);
@@ -658,6 +679,20 @@ impl AclStore {
 
     pub fn owner_id(&self) -> i64 {
         self.owner_id
+    }
+
+    /// Deterministic list of all configured owner UIDs (primary owner first, then sorted extras).
+    pub fn owner_ids(&self) -> Vec<i64> {
+        let mut out = vec![self.owner_id];
+        let mut extras: Vec<i64> = self
+            .owner_ids
+            .iter()
+            .copied()
+            .filter(|&id| id != self.owner_id)
+            .collect();
+        extras.sort_unstable();
+        out.extend(extras);
+        out
     }
 
     pub fn is_owner(&self, uid: i64) -> bool {
@@ -713,7 +748,7 @@ impl AclStore {
             .inner
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
-        let (rec, should_save) = touch_user_locked(&mut guard, self.owner_id, user, now);
+        let (rec, should_save) = touch_user_locked(&mut guard, &self.owner_ids, user, now);
         if should_save {
             atomic_write_json(&self.path, &guard.data, true)?;
         }
@@ -738,7 +773,7 @@ impl AclStore {
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
 
-        let already_approved = uid == self.owner_id
+        let already_approved = self.is_owner(uid)
             || guard
                 .data
                 .users
@@ -746,7 +781,7 @@ impl AclStore {
                 .is_some_and(|r| r.status == UserStatus::Approved);
 
         if already_approved {
-            let (rec, should_save) = touch_user_locked(&mut guard, self.owner_id, user, now);
+            let (rec, should_save) = touch_user_locked(&mut guard, &self.owner_ids, user, now);
             if should_save {
                 atomic_write_json(&self.path, &guard.data, true)?;
             }
@@ -836,7 +871,7 @@ impl AclStore {
         preset: Option<RolePreset>,
         now: f64,
     ) -> Result<AclUser> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Err(BridgeError::PermissionDenied(
                 "Cannot modify owner status".into(),
             ));
@@ -880,7 +915,7 @@ impl AclStore {
 
     /// Returns the effective [`RoleTier`] for `uid` (`Owner` for `owner_id`, stored tier for non-owners).
     pub fn tier_of(&self, uid: i64) -> RoleTier {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return RoleTier::Owner;
         }
         let Ok(guard) = self.inner.read() else {
@@ -897,7 +932,7 @@ impl AclStore {
 
     /// Returns `true` if `uid` is an approved Admin (or the Owner).
     pub fn is_admin(&self, uid: i64) -> bool {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return true;
         }
         let Ok(guard) = self.inner.read() else {
@@ -917,7 +952,7 @@ impl AclStore {
 
     /// Changes a non-owner user's [`RoleTier`] (`User` or `Admin`), optionally applying tier defaults.
     pub fn set_tier(&self, uid: i64, tier: RoleTier, apply_defaults: bool) -> Result<AclUser> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Err(BridgeError::PermissionDenied(
                 "Cannot modify owner tier".into(),
             ));
@@ -959,7 +994,7 @@ impl AclStore {
 
     /// Checks whether `uid` effectively holds `perm` (owner always `true`; blocked/pending always `false`).
     pub fn has_perm(&self, uid: i64, perm: &str) -> bool {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return true;
         }
         let Ok(guard) = self.inner.read() else {
@@ -976,7 +1011,7 @@ impl AclStore {
 
     /// Sets (or toggles when `val == None`) a permission bit for a non-owner user.
     pub fn set_perm(&self, uid: i64, perm: &str, val: Option<bool>) -> Result<AclUser> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Err(BridgeError::PermissionDenied(
                 "Cannot modify owner permissions".into(),
             ));
@@ -1011,7 +1046,7 @@ impl AclStore {
 
     /// Applies a named [`RolePreset`] to a non-owner user.
     pub fn apply_preset(&self, uid: i64, preset: RolePreset) -> Result<AclUser> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Err(BridgeError::PermissionDenied(
                 "Cannot apply preset to owner".into(),
             ));
@@ -1041,7 +1076,7 @@ impl AclStore {
 
     /// Removes a non-owner user and suppresses future re-seeding from `ALLOWED_USER_IDS`.
     pub fn remove_user(&self, uid: i64) -> Result<bool> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Err(BridgeError::PermissionDenied("Cannot remove owner".into()));
         }
         let mut guard = self
@@ -1081,10 +1116,9 @@ impl AclStore {
             .cloned()
             .collect();
 
-        let owner_id = self.owner_id;
         items.sort_by(|a, b| {
             let bucket = |u: &AclUser| -> u8 {
-                if u.uid == owner_id {
+                if self.is_owner(u.uid) {
                     0
                 } else {
                     match u.status {
@@ -1105,7 +1139,7 @@ impl AclStore {
 
     /// Toggles selection state of `uid` (owner can never be selected; returns `false`).
     pub fn toggle_select(&self, uid: i64) -> Result<bool> {
-        if uid == self.owner_id {
+        if self.is_owner(uid) {
             return Ok(false);
         }
         let mut guard = self
@@ -1133,7 +1167,7 @@ impl AclStore {
         if selected {
             let mut seen: HashSet<i64> = guard.data.selected.iter().copied().collect();
             for &uid in uids {
-                if uid == self.owner_id || !seen.insert(uid) {
+                if self.is_owner(uid) || !seen.insert(uid) {
                     continue;
                 }
                 guard.data.selected.push(uid);
@@ -1142,7 +1176,7 @@ impl AclStore {
             let remove_set: HashSet<i64> = uids
                 .iter()
                 .copied()
-                .filter(|&u| u != self.owner_id)
+                .filter(|&u| !self.is_owner(u))
                 .collect();
             guard.data.selected.retain(|u| !remove_set.contains(u));
         }
@@ -1188,7 +1222,7 @@ impl AclStore {
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
 
-        let uids = resolve_bulk_targets_locked(&guard.data, self.owner_id, target);
+        let uids = resolve_bulk_targets_locked(&guard.data, &self.owner_ids, target);
         let mut modified = Vec::with_capacity(uids.len());
         for uid in uids {
             if let Some(rec) = guard.data.users.get_mut(&uid.to_string()) {
@@ -1217,7 +1251,7 @@ impl AclStore {
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
 
-        let uids = resolve_bulk_targets_locked(&guard.data, self.owner_id, target);
+        let uids = resolve_bulk_targets_locked(&guard.data, &self.owner_ids, target);
         let mut modified = Vec::with_capacity(uids.len());
         for uid in uids {
             if let Some(rec) = guard.data.users.get_mut(&uid.to_string()) {
@@ -1238,7 +1272,7 @@ impl AclStore {
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
 
-        let uids = resolve_bulk_targets_locked(&guard.data, self.owner_id, target);
+        let uids = resolve_bulk_targets_locked(&guard.data, &self.owner_ids, target);
         let mut modified = Vec::with_capacity(uids.len());
         for uid in uids {
             if let Some(rec) = guard.data.users.get_mut(&uid.to_string()) {
@@ -1269,7 +1303,7 @@ impl AclStore {
             .write()
             .map_err(|e| BridgeError::Internal(format!("acl write lock poisoned: {e}")))?;
 
-        let uids = resolve_bulk_targets_locked(&guard.data, self.owner_id, target);
+        let uids = resolve_bulk_targets_locked(&guard.data, &self.owner_ids, target);
         let mut modified = Vec::with_capacity(uids.len());
         for uid in uids {
             if let Some(rec) = guard.data.users.get_mut(&uid.to_string()) {
@@ -1483,7 +1517,7 @@ fn make_user_record(
 
 fn touch_user_locked(
     guard: &mut AclInner,
-    owner_id: i64,
+    owner_ids: &HashSet<i64>,
     user: &User,
     now: f64,
 ) -> (AclUser, bool) {
@@ -1498,7 +1532,7 @@ fn touch_user_locked(
         }
         let prev_last_seen = rec.last_seen;
         rec.last_seen = now;
-        if uid == owner_id {
+        if owner_ids.contains(&uid) {
             rec.status = UserStatus::Approved;
             rec.role = "owner".to_string();
             rec.perms = Perms::owner();
@@ -1515,7 +1549,7 @@ fn touch_user_locked(
         }
         (snapshot, should_save)
     } else {
-        let is_owner = uid == owner_id;
+        let is_owner = owner_ids.contains(&uid);
         let rec = make_user_record(
             uid,
             if is_owner {
@@ -1555,30 +1589,34 @@ fn apply_status_to_record(
     }
 }
 
-fn resolve_bulk_targets_locked(data: &AclData, owner_id: i64, target: BulkTarget) -> Vec<i64> {
+fn resolve_bulk_targets_locked(
+    data: &AclData,
+    owner_ids: &HashSet<i64>,
+    target: BulkTarget,
+) -> Vec<i64> {
     match target {
         BulkTarget::Selected => data
             .selected
             .iter()
             .copied()
-            .filter(|&uid| uid != owner_id && data.users.contains_key(&uid.to_string()))
+            .filter(|&uid| !owner_ids.contains(&uid) && data.users.contains_key(&uid.to_string()))
             .collect(),
         BulkTarget::Pending => data
             .users
             .values()
-            .filter(|rec| rec.uid != owner_id && rec.status == UserStatus::Pending)
+            .filter(|rec| !owner_ids.contains(&rec.uid) && rec.status == UserStatus::Pending)
             .map(|rec| rec.uid)
             .collect(),
         BulkTarget::ApprovedNonOwner => data
             .users
             .values()
-            .filter(|rec| rec.uid != owner_id && rec.status == UserStatus::Approved)
+            .filter(|rec| !owner_ids.contains(&rec.uid) && rec.status == UserStatus::Approved)
             .map(|rec| rec.uid)
             .collect(),
         BulkTarget::AllNonOwner => data
             .users
             .values()
-            .filter(|rec| rec.uid != owner_id)
+            .filter(|rec| !owner_ids.contains(&rec.uid))
             .map(|rec| rec.uid)
             .collect(),
     }
@@ -1619,7 +1657,8 @@ fn parse_opt_string(v: Option<&Value>, dirty: &mut bool) -> Option<String> {
 
 fn load_and_sanitize(
     path: &Path,
-    owner_id: i64,
+    primary_owner_id: i64,
+    owner_ids: &HashSet<i64>,
     seed_allowed: &[i64],
     now: f64,
 ) -> Result<(AclInner, bool)> {
@@ -1679,7 +1718,7 @@ fn load_and_sanitize(
                 };
 
                 let role = match rec_obj.get("role").and_then(Value::as_str) {
-                    Some(r) if uid == owner_id => {
+                    Some(r) if owner_ids.contains(&uid) => {
                         if r != "owner" {
                             dirty = true;
                         }
@@ -1705,7 +1744,7 @@ fn load_and_sanitize(
                     },
                     None => {
                         dirty = true;
-                        if uid == owner_id {
+                        if owner_ids.contains(&uid) {
                             "owner".to_string()
                         } else {
                             "user".to_string()
@@ -1812,7 +1851,7 @@ fn load_and_sanitize(
                     dirty = true;
                     continue;
                 };
-                if uid == owner_id || !seen_suppressed.insert(uid) {
+                if owner_ids.contains(&uid) || !seen_suppressed.insert(uid) {
                     dirty = true;
                     continue;
                 }
@@ -1831,7 +1870,7 @@ fn load_and_sanitize(
                     dirty = true;
                     continue;
                 };
-                if uid == owner_id || !seen_selected.insert(uid) {
+                if owner_ids.contains(&uid) || !seen_selected.insert(uid) {
                     dirty = true;
                     continue;
                 }
@@ -1859,40 +1898,50 @@ fn load_and_sanitize(
         }
     }
 
-    // Enforce owner immunity invariants unconditionally.
-    let owner_key = owner_id.to_string();
-    match data.users.get_mut(&owner_key) {
-        None => {
-            data.users.insert(
-                owner_key,
-                make_user_record(
-                    owner_id,
-                    UserStatus::Approved,
-                    "owner",
-                    Perms::owner(),
-                    now,
-                    &UserMeta::default(),
-                ),
-            );
-            last_touch_save.insert(owner_id, now);
-            dirty = true;
-        }
-        Some(owner_rec) => {
-            if owner_rec.status != UserStatus::Approved
-                || owner_rec.role != "owner"
-                || owner_rec.perms != Perms::owner()
-            {
-                owner_rec.status = UserStatus::Approved;
-                owner_rec.role = "owner".to_string();
-                owner_rec.perms = Perms::owner();
+    // Enforce owner immunity invariants unconditionally for ALL configured owners.
+    let mut ordered_owners: Vec<i64> = vec![primary_owner_id];
+    let mut extras: Vec<i64> = owner_ids
+        .iter()
+        .copied()
+        .filter(|&id| id != primary_owner_id)
+        .collect();
+    extras.sort_unstable();
+    ordered_owners.extend(extras);
+    for oid in ordered_owners {
+        let owner_key = oid.to_string();
+        match data.users.get_mut(&owner_key) {
+            None => {
+                data.users.insert(
+                    owner_key,
+                    make_user_record(
+                        oid,
+                        UserStatus::Approved,
+                        "owner",
+                        Perms::owner(),
+                        now,
+                        &UserMeta::default(),
+                    ),
+                );
+                last_touch_save.insert(oid, now);
                 dirty = true;
+            }
+            Some(owner_rec) => {
+                if owner_rec.status != UserStatus::Approved
+                    || owner_rec.role != "owner"
+                    || owner_rec.perms != Perms::owner()
+                {
+                    owner_rec.status = UserStatus::Approved;
+                    owner_rec.role = "owner".to_string();
+                    owner_rec.perms = Perms::owner();
+                    dirty = true;
+                }
             }
         }
     }
 
     // Seed allowed users unless already present or suppressed.
     for &uid in seed_allowed {
-        if uid == owner_id {
+        if owner_ids.contains(&uid) {
             continue;
         }
         let ukey = uid.to_string();
@@ -2606,5 +2655,87 @@ mod tests {
             !path.exists(),
             "blocked /start spam within debounce window must not rewrite acl.json"
         );
+    }
+
+    #[test]
+    fn multi_owner_full_parity_reload_and_bulk_immunity() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("acl.json");
+        let owner1 = OWNER_ID;
+        let owner2 = OWNER_ID + 777;
+        let user_id = 8888_i64;
+
+        let acl = AclStore::open_with_owners(&path, owner1, &[owner2], &[user_id], 300).unwrap();
+        assert!(acl.is_owner(owner1));
+        assert!(acl.is_owner(owner2));
+        assert_eq!(acl.owner_ids(), vec![owner1, owner2]);
+        assert_eq!(acl.tier_of(owner2), RoleTier::Owner);
+        assert!(acl.is_admin(owner2));
+        assert!(acl.is_approved(owner2));
+        for perm in PERM_KEYS {
+            assert!(acl.has_perm(owner2, perm), "owner2 missing perm {perm}");
+        }
+
+        // Touching owner2 and /start attempts preserve Owner tier & never send stranger notice
+        let touched = acl.touch_user_at(&make_tg_user(owner2, Some("o2"), "Owner2"), 1200.0).unwrap();
+        assert_eq!(touched.role, "owner");
+        assert_eq!(touched.status, UserStatus::Approved);
+        let (_, should_notify) = acl
+            .record_start_attempt_at(&make_tg_user(owner2, Some("o2"), "Owner2"), 1205.0)
+            .unwrap();
+        assert!(!should_notify, "owner2 /start must not trigger stranger alert");
+
+        // Owner2 cannot be mutated, demoted, selected, or removed
+        assert!(matches!(
+            acl.set_status_at(owner2, UserStatus::Blocked, Some(owner1), None, 1210.0),
+            Err(BridgeError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            acl.set_tier(owner2, RoleTier::User, true),
+            Err(BridgeError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            acl.set_perm(owner2, "grok", Some(false)),
+            Err(BridgeError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            acl.apply_preset(owner2, RolePreset::Std),
+            Err(BridgeError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            acl.remove_user(owner2),
+            Err(BridgeError::PermissionDenied(_))
+        ));
+        assert!(!acl.toggle_select(owner2).unwrap());
+        assert_eq!(acl.select_many(&[owner1, owner2, user_id], true).unwrap(), 1);
+
+        // Bulk operations across all 4 targets must never touch owner2
+        let bulk1 = acl
+            .bulk_set_status(BulkTarget::AllNonOwner, UserStatus::Blocked, None, Some(owner1))
+            .unwrap();
+        assert!(!bulk1.contains(&owner2));
+        assert!(bulk1.contains(&user_id));
+        let bulk2 = acl
+            .bulk_set_perm(BulkTarget::AllNonOwner, "grok", false)
+            .unwrap();
+        assert!(!bulk2.contains(&owner2));
+        let bulk3 = acl
+            .bulk_apply_preset(BulkTarget::AllNonOwner, RolePreset::Std)
+            .unwrap();
+        assert!(!bulk3.contains(&owner2));
+        let bulk4 = acl
+            .bulk_set_tier(BulkTarget::AllNonOwner, RoleTier::User, true)
+            .unwrap();
+        assert!(!bulk4.contains(&owner2));
+        assert_eq!(acl.tier_of(owner2), RoleTier::Owner);
+        assert!(acl.is_approved(owner2));
+
+        // Reloading from disk with open_with_owners preserves owner2 without demoting it
+        let reloaded = AclStore::open_with_owners(&path, owner1, &[owner2], &[user_id], 300).unwrap();
+        assert!(reloaded.is_owner(owner2));
+        assert_eq!(reloaded.tier_of(owner2), RoleTier::Owner);
+        assert!(reloaded.has_perm(owner2, "root_access"));
+        let listed = reloaded.list_users(UserFilter::All);
+        assert!(listed.iter().take(2).all(|u| u.uid == owner1 || u.uid == owner2));
     }
 }

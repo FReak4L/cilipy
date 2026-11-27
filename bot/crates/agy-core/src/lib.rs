@@ -10,6 +10,8 @@ pub mod outbox;
 pub mod proxies;
 pub mod security;
 pub mod store;
+pub mod telemetry;
+pub mod text;
 pub mod tg;
 
 pub use accounts::{AccountPolicy, AccountPolicyPreset, AccountUsage, QuotaScope};

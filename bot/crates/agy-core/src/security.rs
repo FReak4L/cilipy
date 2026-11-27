@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use regex::Regex;
 use url::Url;
@@ -29,10 +29,8 @@ const BINARY_SKIP_EXTS: &[&str] = &[
 ];
 
 fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
 }
 
 /// Outcome of a rate-limit admission check.

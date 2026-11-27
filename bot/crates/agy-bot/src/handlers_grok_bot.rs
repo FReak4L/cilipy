@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use agy_core::proxies::ResolvedProxy;
 use agy_core::store::UserState;
@@ -33,6 +33,7 @@ pub const GROK_BOT_AGENT_NAME_KEY: &str = "grok_bot_agent_name";
 
 struct ActiveGrokBotAuth {
     session: Arc<GrokBotAuthSession>,
+    initiator_uid: i64,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
     expires_at: Instant,
     polls: Arc<AtomicU32>,
@@ -80,18 +81,11 @@ fn fmt_mm_ss(secs: u64) -> String {
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    agy_core::text::now_unix()
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        s.chars().take(max_chars).collect()
-    }
+    agy_core::text::truncate_chars(s, max_chars)
 }
 
 fn fmt_token_status(expires_at: i64) -> String {
@@ -440,13 +434,34 @@ pub async fn start_grok_bot_oauth(
         return;
     }
 
-    {
+    let busy_msg: Option<String> = {
         let mut slot = active_grok_bot_auth()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(prev) = slot.take() {
-            prev.session.cancel();
+        let peer_rem = slot.as_ref().and_then(|prev| {
+            let alive = !*prev.cancel_rx.borrow() && Instant::now() < prev.expires_at;
+            (alive && prev.initiator_uid != uid)
+                .then(|| prev.expires_at.saturating_duration_since(Instant::now()).as_secs())
+        });
+        if let Some(rem) = peer_rem {
+            Some(format!(
+                "⏳ Another owner already has an active Grok Bot login in progress ({} left). Cancel it first or wait.",
+                fmt_mm_ss(rem)
+            ))
+        } else {
+            if let Some(prev) = slot.take() {
+                prev.session.cancel();
+            }
+            None
         }
+    };
+    if let Some(msg) = busy_msg {
+        if let Some(cq) = cq {
+            ctx.ack(&cq.id, Some(&msg), true).await;
+        } else {
+            let _ = ctx.render.send_html_simple(chat_id, &msg, None).await;
+        }
+        return;
     }
 
     if let Some(cq) = cq {
@@ -502,6 +517,7 @@ pub async fn start_grok_bot_oauth(
             .unwrap_or_else(|e| e.into_inner());
         *slot = Some(ActiveGrokBotAuth {
             session: Arc::clone(&sess),
+            initiator_uid: uid,
             cancel_rx: cancel_rx.clone(),
             expires_at: deadline,
             polls: Arc::clone(&polls_ctr),

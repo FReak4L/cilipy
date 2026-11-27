@@ -498,6 +498,7 @@ pub async fn build_widget_states(
         "mcp" => Ok(build_mcp_states(ctx, uid)),
         "models" => Ok(build_models_states(ctx, uid)),
         "memory" => Ok(build_memory_states(ctx, q, mem_type).await),
+        "telemetry" => Ok(Box::pin(crate::handlers_telemetry::build_telemetry_widget_states(ctx, uid, false)).await),
         other => Err(BridgeError::Validation(format!(
             "Unknown built-in widget kind: {other:?}"
         ))),
@@ -988,6 +989,7 @@ pub async fn execute_widget_data_action(
         || is_special_prefix("mcp:")
         || is_special_prefix("mdl:")
         || is_special_prefix("mem:")
+        || is_special_prefix("tel:")
         || is_special_prefix("counter:")
         || is_special_prefix("kv:")
         || is_special_prefix("ask:")
@@ -1279,6 +1281,42 @@ pub async fn execute_widget_data_action(
         return (rich, Some(compact_cd), None);
     }
 
+    if raw_data.starts_with("tel:") || (h_low == "telemetry" && !has_other_prefix) {
+        if !ctx.is_owner(uid) {
+            return (
+                json!({ "ok": false, "error": "Owner permission required" }),
+                None,
+                None,
+            );
+        }
+        let mut force = raw_data == "tel:ref";
+        if let Some(eng) = raw_data.strip_prefix("tel:sw:") {
+            let eng = eng.trim();
+            if matches!(eng, "agy" | "grok" | "gemini_web" | "uncensored") {
+                let _ = ctx.store.update_user(uid, |u| {
+                    if eng == "agy" {
+                        u.extra.remove("engine");
+                        if u.model.as_deref().is_some_and(|m| {
+                            agy_ext::grok_oauth::is_grok_model(m)
+                                || agy_ext::uncensored::is_uncensored_model(m)
+                        }) {
+                            u.model = None;
+                        }
+                    } else {
+                        u.extra.insert("engine".to_string(), json!(eng));
+                    }
+                });
+                force = false;
+            }
+        }
+        let (compact_cd, mut rich) =
+            Box::pin(crate::handlers_telemetry::build_telemetry_widget_states(ctx, uid, force)).await;
+        if let Some(m) = rich.as_object_mut() {
+            m.insert("ok".to_string(), json!(true));
+        }
+        return (rich, Some(compact_cd), None);
+    }
+
     if raw_data.starts_with("counter:")
         || raw_data.starts_with("kv:")
         || matches!(h_low.as_str(), "kv" | "counter")
@@ -1387,13 +1425,7 @@ async fn submit_mcp_ai_request(
         ),
     ]]);
 
-    if let Err(err) = ctx
-        .render
-        .send_rich_card_message(ctx.cfg.owner_id, &md, Some(markup))
-        .await
-    {
-        warn!(error = %err, req_id = %req.req_id, "failed sending MCP approval card to owner");
-    }
+    ctx.broadcast_owners_rich(&md, Some(markup)).await;
     Ok(req)
 }
 
@@ -1951,6 +1983,48 @@ async fn handle_action_impl(
         }
 
         "set_toggle" => Ok(handle_settings_toggle(ctx, uid, &p).await),
+
+        "tel_refresh" => {
+            if !ctx.is_owner(uid) {
+                return Ok(BridgeActionResponse::rejected(403, "Owner permission required"));
+            }
+            let force = p.get("force").and_then(Value::as_bool).unwrap_or(true);
+            let (compact_cd, rich) =
+                Box::pin(crate::handlers_telemetry::build_telemetry_widget_states(ctx, uid, force)).await;
+            let mut resp = BridgeActionResponse::ok(json!({ "ok": true }));
+            resp.chat_data = Some(compact_cd);
+            resp.rich_state = Some(rich);
+            Ok(resp)
+        }
+
+        "tel_switch" => {
+            if !ctx.is_owner(uid) {
+                return Ok(BridgeActionResponse::rejected(403, "Owner permission required"));
+            }
+            let eng = p.get("engine").and_then(Value::as_str).unwrap_or("agy").trim();
+            if !matches!(eng, "agy" | "grok" | "gemini_web" | "uncensored") {
+                return Ok(BridgeActionResponse::rejected(400, "Unsupported engine"));
+            }
+            let _ = ctx.store.update_user(uid, |u| {
+                if eng == "agy" {
+                    u.extra.remove("engine");
+                    if u.model.as_deref().is_some_and(|m| {
+                        agy_ext::grok_oauth::is_grok_model(m)
+                            || agy_ext::uncensored::is_uncensored_model(m)
+                    }) {
+                        u.model = None;
+                    }
+                } else {
+                    u.extra.insert("engine".to_string(), json!(eng));
+                }
+            });
+            let (compact_cd, rich) =
+                Box::pin(crate::handlers_telemetry::build_telemetry_widget_states(ctx, uid, false)).await;
+            let mut resp = BridgeActionResponse::ok(json!({ "ok": true, "engine": eng }));
+            resp.chat_data = Some(compact_cd);
+            resp.rich_state = Some(rich);
+            Ok(resp)
+        }
 
         "mem_search" => {
             let q = p.get("q").and_then(Value::as_str).unwrap_or("");

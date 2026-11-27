@@ -12,10 +12,7 @@ use crate::config::redact_proxy_url;
 use crate::error::Result;
 
 fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    crate::text::now_secs()
 }
 
 /// Serialized JSON snapshot written to `/var/lib/agy-telegram/health.json`.

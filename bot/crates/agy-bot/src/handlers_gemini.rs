@@ -3,7 +3,7 @@
 //! Canvas mode, Image Create mode, and OpenHands 35-tool Agent mode.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agy_core::proxies::ResolvedProxy;
@@ -26,6 +26,15 @@ pub const GEMINI_MODE_KEY: &str = "gemini_mode";
 pub const GEMINI_GEM_KEY: &str = "gemini_gem_id";
 pub const GEMINI_MODEL_KEY: &str = "gemini_model";
 pub const GEMINI_THREE_STAGE_KEY: &str = "gemini_three_stage";
+pub const GEMINI_PINNED_ACCT_KEY: &str = "gemini_pinned_account";
+
+pub fn gemini_pinned_account(u: &UserState) -> Option<String> {
+    u.extra
+        .get(GEMINI_PINNED_ACCT_KEY)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
 
 pub fn gemini_chat_mode(u: &UserState) -> GeminiChatMode {
     u.extra
@@ -820,17 +829,17 @@ pub async fn handle_gemini_cb(
         return true;
     }
     if let Some(gid) = data.strip_prefix("gem:gclr:") {
-        let mut store = GeminiGemStore::load(&ctx.cfg.state_dir);
-        store.clear_sources(gid);
-        let _ = store.save(&ctx.cfg.state_dir);
+        let _ = GeminiGemStore::mutate_locked(&ctx.cfg.state_dir, |store| {
+            store.clear_sources(gid);
+        });
         ctx.ack(&cq.id, Some("🧹 Sources cleared"), false).await;
         show_gem_detail(ctx, uid, chat_id, Some(cq), gid).await;
         return true;
     }
     if let Some(gid) = data.strip_prefix("gem:gdel:") {
-        let mut store = GeminiGemStore::load(&ctx.cfg.state_dir);
-        store.delete(gid);
-        let _ = store.save(&ctx.cfg.state_dir);
+        let _ = GeminiGemStore::mutate_locked(&ctx.cfg.state_dir, |store| {
+            store.delete(gid);
+        });
         let _ = ctx.store.update_user(uid, |u| {
             if u.extra.get(GEMINI_GEM_KEY).and_then(|v| v.as_str()) == Some(gid) {
                 u.extra.remove(GEMINI_GEM_KEY);
@@ -997,16 +1006,21 @@ pub async fn handle_gemini_cb(
         return true;
     }
     if let Some(id) = data.strip_prefix("gem:pin:") {
-        let msg = GeminiAccountPool::mutate_locked(&ctx.cfg.state_dir, |pool| {
-            if id == "auto" {
-                pool.active_account_id = None;
-                "Switched to Smart Balance".to_string()
-            } else {
-                pool.active_account_id = Some(id.to_string());
-                format!("Pinned {id}")
-            }
-        })
-        .unwrap_or_else(|_| "Updated".to_string());
+        let msg = if id == "auto" {
+            let _ = ctx.store.update_user(uid, |u| {
+                u.extra.remove(GEMINI_PINNED_ACCT_KEY);
+            });
+            "Switched to Smart Balance (your session)".to_string()
+        } else {
+            let id_owned = id.to_string();
+            let _ = ctx.store.update_user(uid, move |u| {
+                u.extra.insert(
+                    GEMINI_PINNED_ACCT_KEY.to_string(),
+                    serde_json::Value::String(id_owned),
+                );
+            });
+            format!("Pinned {id} for your session")
+        };
         ctx.ack(&cq.id, Some(&msg), false).await;
         show_gemini_accounts(ctx, uid, chat_id, Some(cq)).await;
         return true;
@@ -1244,6 +1258,13 @@ pub async fn handle_gemini_awaiting_text(
             true
         }
         "gem:gnew" => {
+            if !ctx.has_perm(uid, "uncensored") {
+                let _ = ctx
+                    .render
+                    .send_html_simple(chat_id, "⛔ Permission denied.", None)
+                    .await;
+                return true;
+            }
             let parts: Vec<&str> = text.split('|').map(str::trim).collect();
             if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
                 let _ = ctx
@@ -1257,17 +1278,21 @@ pub async fn handle_gemini_awaiting_text(
                 return true;
             }
             let id = sanitize_slug(parts[0]);
-            let mut store = GeminiGemStore::load(&ctx.cfg.state_dir);
-            store.upsert(GeminiGem {
-                id: id.clone(),
-                name: parts[0].to_string(),
-                system_prompt: parts[1].to_string(),
-                remote_gem_id: parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                source_files: Vec::new(),
-                canvas_default: false,
-                updated_at: 0,
+            let id_for_gem = id.clone();
+            let name_s = parts[0].to_string();
+            let prompt_s = parts[1].to_string();
+            let remote_s = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+            let _ = GeminiGemStore::mutate_locked(&ctx.cfg.state_dir, |store| {
+                store.upsert(GeminiGem {
+                    id: id_for_gem,
+                    name: name_s,
+                    system_prompt: prompt_s,
+                    remote_gem_id: remote_s,
+                    source_files: Vec::new(),
+                    canvas_default: false,
+                    updated_at: 0,
+                });
             });
-            let _ = store.save(&ctx.cfg.state_dir);
             let _ = ctx.store.update_user(uid, |u| {
                 u.extra.insert(
                     GEMINI_GEM_KEY.to_string(),
@@ -1278,41 +1303,75 @@ pub async fn handle_gemini_awaiting_text(
             true
         }
         "gem:gsrc" => {
+            if !ctx.has_perm(uid, "uncensored") {
+                let _ = ctx
+                    .render
+                    .send_html_simple(chat_id, "⛔ Permission denied.", None)
+                    .await;
+                return true;
+            }
             let Some(gid) = inp.data.as_str() else {
                 return true;
             };
-            let mut store = GeminiGemStore::load(&ctx.cfg.state_dir);
             let candidate = Path::new(text);
             let final_path = if candidate.is_file() {
-                let ws_ok = candidate.starts_with(&ctx.cfg.agy_workspace)
-                    || candidate.starts_with(&ctx.cfg.state_dir)
-                    || ctx.has_perm(uid, "root_access");
-                if !ws_ok {
-                    let _ = ctx
-                        .render
-                        .send_html_simple(chat_id, "⛔ Path must be inside workspace.", None)
-                        .await;
-                    return true;
+                match validate_gem_source_path(
+                    candidate,
+                    &ctx.cfg.agy_workspace,
+                    &ctx.cfg.state_dir,
+                    ctx.has_perm(uid, "root_access"),
+                ) {
+                    Some(canon) => canon.to_string_lossy().to_string(),
+                    None => {
+                        let _ = ctx
+                            .render
+                            .send_html_simple(chat_id, "⛔ Path must be inside workspace.", None)
+                            .await;
+                        return true;
+                    }
                 }
-                text.to_string()
             } else {
                 let sdir = gemini_gem_sources_dir(&ctx.cfg.state_dir, gid);
                 let _ = fs::create_dir_all(&sdir);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let ts = agy_core::text::now_unix().max(0) as u64;
                 let dst = sdir.join(format!("note_{ts}.md"));
                 let _ = fs::write(&dst, text);
                 dst.to_string_lossy().to_string()
             };
-            store.attach_source(gid, &final_path);
-            let _ = store.save(&ctx.cfg.state_dir);
+            let _ = GeminiGemStore::mutate_locked(&ctx.cfg.state_dir, |store| {
+                store.attach_source(gid, &final_path);
+            });
             show_gem_detail(ctx, uid, chat_id, None, gid).await;
             true
         }
         _ => false,
     }
+}
+
+/// Validate a file path attached as a Gem source. Non-root users are strictly
+/// confined to canonical paths inside `workspace` or `<state_dir>/gemini_web/gem_sources`
+/// (blocking `../../`, symlink escapes, and sensitive state files like `proxies.json`).
+fn validate_gem_source_path(
+    candidate: &Path,
+    workspace: &Path,
+    state_dir: &Path,
+    allow_root: bool,
+) -> Option<PathBuf> {
+    let canon = fs::canonicalize(candidate).ok()?;
+    if !canon.is_file() {
+        return None;
+    }
+    if allow_root {
+        return Some(canon);
+    }
+    let in_ws = fs::canonicalize(workspace)
+        .ok()
+        .is_some_and(|w| canon.starts_with(&w));
+    let gem_sources_root = agy_ext::gemini_web::gemini_state_dir(state_dir).join("gem_sources");
+    let in_gem_sources = fs::canonicalize(&gem_sources_root)
+        .ok()
+        .is_some_and(|s| canon.starts_with(&s));
+    (in_ws || in_gem_sources).then_some(canon)
 }
 
 #[cfg(test)]
@@ -1341,5 +1400,36 @@ mod tests {
         assert_eq!(gemini_active_gem_id(&u).as_deref(), Some("rust-architect"));
         assert_eq!(gemini_selected_model(&u).as_deref(), Some("gemini-2.5-pro"));
         assert_eq!(gemini_three_stage_mode(&u), ThreeStageMode::Always);
+    }
+
+    #[test]
+    fn validate_gem_source_path_blocks_traversal_for_non_root() {
+        let td = tempfile::TempDir::new().unwrap();
+        let ws = td.path().join("workspace");
+        let st = td.path().join("state");
+        let outside = td.path().join("secret.txt");
+        let inside = ws.join("notes.md");
+        let proxies_json = st.join("proxies.json");
+        let gem_accounts = agy_ext::gemini_web::gemini_accounts_path(&st);
+        let gem_note = gemini_gem_sources_dir(&st, "g1").join("note.md");
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(gem_note.parent().unwrap()).unwrap();
+        fs::write(&outside, "secret").unwrap();
+        fs::write(&inside, "hello").unwrap();
+        fs::write(&proxies_json, "{\"proxies\":[]}").unwrap();
+        fs::write(&gem_accounts, "{\"accounts\":[]}").unwrap();
+        fs::write(&gem_note, "gem note").unwrap();
+
+        let traversal = ws.join("..").join("secret.txt");
+        // Non-root: traversal outside workspace MUST be rejected
+        assert!(validate_gem_source_path(&traversal, &ws, &st, false).is_none());
+        // Non-root: sensitive files in state_dir (proxies.json, gemini accounts.json) MUST be rejected
+        assert!(validate_gem_source_path(&proxies_json, &ws, &st, false).is_none());
+        assert!(validate_gem_source_path(&gem_accounts, &ws, &st, false).is_none());
+        // Non-root: legitimate workspace file and gem_sources note succeed
+        assert!(validate_gem_source_path(&inside, &ws, &st, false).is_some());
+        assert!(validate_gem_source_path(&gem_note, &ws, &st, false).is_some());
+        // Root user: allowed
+        assert!(validate_gem_source_path(&traversal, &ws, &st, true).is_some());
     }
 }

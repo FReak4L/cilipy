@@ -1,7 +1,7 @@
 //! Owner-only `/accounts` panel: multi-account Antigravity pool (`acct:*` callbacks),
 //! including the Telegram-relayed Google OAuth sign-in for new account slots.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agy_core::accounts::{
@@ -12,24 +12,38 @@ use agy_core::proxies::ResolvedProxy;
 use agy_core::tg::{CallbackQuery, InlineKeyboardButton, Message};
 use agy_ext::login::LoginSession;
 use agy_render::md_cell;
+use dashmap::DashMap;
 use serde_json::json;
 use tracing::{info, warn};
 
 use crate::ctx::BotCtx;
 use crate::jobs::{human_secs, AwaitingInput};
 
-/// Single in-flight sign-in (owner only).
-fn login_slot() -> &'static Mutex<Option<Arc<LoginSession>>> {
-    static S: OnceLock<Mutex<Option<Arc<LoginSession>>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(None))
+struct ActiveLogin {
+    session: Arc<LoginSession>,
+    initiator_uid: i64,
 }
 
-fn take_login() -> Option<Arc<LoginSession>> {
-    login_slot().lock().unwrap_or_else(|e| e.into_inner()).take()
+/// Concurrent per-account in-flight sign-ins keyed by `account_id` (supports multiple owners).
+fn login_slots() -> &'static DashMap<String, ActiveLogin> {
+    static S: OnceLock<DashMap<String, ActiveLogin>> = OnceLock::new();
+    S.get_or_init(DashMap::new)
 }
 
-fn current_login() -> Option<Arc<LoginSession>> {
-    login_slot().lock().unwrap_or_else(|e| e.into_inner()).clone()
+fn take_login_for(account_id: &str) -> Option<ActiveLogin> {
+    login_slots().remove(account_id).map(|(_, v)| v)
+}
+
+fn take_login_if_same(account_id: &str, sess: &Arc<LoginSession>) -> Option<ActiveLogin> {
+    login_slots()
+        .remove_if(account_id, |_, v| Arc::ptr_eq(&v.session, sess))
+        .map(|(_, v)| v)
+}
+
+fn current_login_for(account_id: &str) -> Option<(Arc<LoginSession>, i64)> {
+    login_slots()
+        .get(account_id)
+        .map(|v| (Arc::clone(&v.session), v.initiator_uid))
 }
 
 fn now() -> i64 {
@@ -258,9 +272,10 @@ pub async fn show_list(ctx: &Arc<BotCtx>, cq: Option<&CallbackQuery>, chat_id: i
             None,
         )]);
     }
-    if let Some(l) = current_login() {
+    let active_ids: Vec<String> = login_slots().iter().map(|e| e.key().clone()).collect();
+    if !active_ids.is_empty() {
         md.push(String::new());
-        md.push(format!("> 🔐 Sign-in in progress for `{}`", l.account_id));
+        md.push(format!("> 🔐 Sign-in in progress for `{}`", active_ids.join("`, `")));
     }
     rows.push(vec![
         ctx.btn("add", "Add Account", Some("acct:add"), Some("success"), None),
@@ -583,21 +598,24 @@ async fn start_login(ctx: &Arc<BotCtx>, uid: i64, chat_id: i64, id: &str) {
             .await;
         return;
     }
-    if let Some(old) = take_login() {
-        abandon_login(ctx, &old).await;
-    }
-    if let Err(e) = p.prepare_home(&a) {
-        let _ = ctx
-            .render
-            .send_html_simple(chat_id, &format!("{} Could not prepare account home: <code>{}</code>", ctx.e("err"), agy_render::esc(&e.to_string())), None)
-            .await;
-        return;
-    }
-    // a fresh sign-in must not reuse a stale/revoked token
-    let tok = a.token_path();
-    if tok.exists() {
-        let bak = tok.with_extension("prev");
-        let _ = std::fs::rename(&tok, &bak);
+    if let Some((_, holder_uid)) = current_login_for(&a.id) {
+        if holder_uid != uid {
+            let _ = ctx
+                .render
+                .send_html_simple(
+                    chat_id,
+                    &format!(
+                        "⏳ Another owner is currently signing in to <code>{}</code>. Wait for them to finish (or sign in to a different slot).",
+                        a.id
+                    ),
+                    None,
+                )
+                .await;
+            return;
+        }
+        if let Some(old) = take_login_for(&a.id) {
+            abandon_login(ctx, &old.session).await;
+        }
     }
     let proxy_url = match ctx.proxies.resolve(a.proxy_id.as_deref()) {
         ResolvedProxy::Use { url, .. } => Some(url),
@@ -618,6 +636,19 @@ async fn start_login(ctx: &Arc<BotCtx>, uid: i64, chat_id: i64, id: &str) {
             return;
         }
     };
+    if let Err(e) = p.prepare_home(&a) {
+        let _ = ctx
+            .render
+            .send_html_simple(chat_id, &format!("{} Could not prepare account home: <code>{}</code>", ctx.e("err"), agy_render::esc(&e.to_string())), None)
+            .await;
+        return;
+    }
+    // a fresh sign-in must not reuse a stale/revoked token
+    let tok = a.token_path();
+    if tok.exists() {
+        let bak = tok.with_extension("prev");
+        let _ = std::fs::rename(&tok, &bak);
+    }
     let wait = ctx
         .render
         .send_html_simple(chat_id, &format!("🔐 <b>Starting sign-in</b> for <code>{}</code>…", a.id), None)
@@ -628,6 +659,8 @@ async fn start_login(ctx: &Arc<BotCtx>, uid: i64, chat_id: i64, id: &str) {
     let sess = match LoginSession::spawn_with_proxy(&bin, &a.home, &a.id, proxy_url.as_deref()) {
         Ok(s) => s,
         Err(e) => {
+            restore_prev_token(&tok);
+            reenable_after_restore(&p, &a.id);
             let _ = ctx
                 .render
                 .send_html_simple(chat_id, &format!("{} Sign-in could not start: <code>{}</code>", ctx.e("err"), agy_render::esc(&e.to_string())), None)
@@ -635,13 +668,20 @@ async fn start_login(ctx: &Arc<BotCtx>, uid: i64, chat_id: i64, id: &str) {
             return;
         }
     };
-    *login_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&sess));
+    login_slots().insert(
+        a.id.clone(),
+        ActiveLogin {
+            session: Arc::clone(&sess),
+            initiator_uid: uid,
+        },
+    );
     let url = match sess.wait_for_url(Duration::from_secs(45)).await {
         Ok(u) => u,
         Err(e) => {
             sess.stop().await;
-            let _ = take_login();
+            let _ = take_login_if_same(&a.id, &sess);
             restore_prev_token(&tok);
+            reenable_after_restore(&p, &a.id);
             let _ = ctx
                 .render
                 .send_html_simple(chat_id, &format!("{} <b>Sign-in failed to start</b>\n<blockquote expandable>{}</blockquote>", ctx.e("err"), agy_render::esc(&e.to_string())), None)
@@ -672,13 +712,12 @@ async fn start_login(ctx: &Arc<BotCtx>, uid: i64, chat_id: i64, id: &str) {
     // waiting for a code
     let sess_w = Arc::downgrade(&sess);
     let ctx_w = Arc::clone(ctx);
+    let acct_id_w = a.id.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(600)).await;
         if let Some(s) = sess_w.upgrade() {
-            let still = current_login().is_some_and(|c| Arc::ptr_eq(&c, &s));
-            if still {
-                let _ = take_login();
-                abandon_login(&ctx_w, &s).await;
+            if let Some(old) = take_login_if_same(&acct_id_w, &s) {
+                abandon_login(&ctx_w, &old.session).await;
                 if ctx_w.jobs.peek_awaiting(uid).is_some_and(|i| i.kind == "acct_code") {
                     ctx_w.jobs.clear_awaiting(uid);
                 }
@@ -792,7 +831,7 @@ pub async fn handle_accounts_awaiting_text(
     // Something that is clearly a normal message (spaces / short) is not a code: hand it
     // back to the normal flow instead of swallowing it.
     let code_like = !t.is_empty() && !t.contains(char::is_whitespace) && t.len() >= 20;
-    let Some(sess) = current_login().filter(|s| s.account_id == id) else {
+    let Some((sess, _)) = current_login_for(&id) else {
         if code_like {
             let _ = ctx.client.delete_message(chat_id, msg.message_id).await;
             let _ = ctx
@@ -846,7 +885,7 @@ pub async fn handle_accounts_awaiting_text(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let tail = sess.tail(500);
-    let _ = take_login();
+    let _ = take_login_if_same(&id, &sess);
     sess.stop().await;
     if let Some(m) = progress {
         let _ = ctx.client.delete_message(chat_id, m.message_id).await;
@@ -953,10 +992,9 @@ pub async fn handle_acct_cb(
         }
         "lc" => {
             // only cancel the sign-in this button belongs to
-            if current_login().is_some_and(|s| s.account_id == id) {
-                if let Some(s) = take_login() {
-                    abandon_login(ctx, &s).await;
-                }
+            if let Some(old) = take_login_for(&id) {
+                abandon_login(ctx, &old.session).await;
+                ctx.jobs.clear_awaiting(old.initiator_uid);
                 ctx.jobs.clear_awaiting(uid);
             } else {
                 ctx.ack(&cq.id, Some("That sign-in is no longer active"), false).await;
@@ -1254,10 +1292,8 @@ pub async fn handle_acct_cb(
                 ctx.ack(&cq.id, Some("This account is running a task; try again when it is idle"), true).await;
                 return true;
             }
-            if current_login().is_some_and(|s| s.account_id == id) {
-                if let Some(s) = take_login() {
-                    s.stop().await;
-                }
+            if let Some(old) = take_login_for(&id) {
+                old.session.stop().await;
             }
             match p.remove(&id) {
                 Ok(()) => ctx.ack(&cq.id, Some("Removed"), false).await,

@@ -182,7 +182,20 @@ fn memory_widget_html() -> String {
     wrap_widget_html(body, js)
 }
 
-/// Build one of the 4 official Apple-HIG built-in interactive widgets (`skills`, `mcp`, `models`, `memory`).
+fn telemetry_widget_html() -> String {
+    let body = concat!(
+        "<div class='hd'><div><div class='ttl'>Quota &amp; Telemetry</div><div id='sub' class='sub'>Loading…</div></div>",
+        "<div class='acts'><span id='md' class='bdg'></span>",
+        "<button id='ref' class='btn sm sec' type='button'>Refresh</button></div></div>",
+        "<div id='sw' class='pills'></div>",
+        "<div class='lbl'>Pools (5h / 7d)</div><div id='pools' class='card'></div>",
+        "<div class='lbl'>Burn Advisor</div><div id='adv' class='card'></div>"
+    );
+    let js = r#"var st=rst(),sub=$('sub'),md=$('md'),sw=$('sw'),pools=$('pools'),adv=$('adv'),err=$('err');var ENGS=[['agy','Antigravity'],['grok','Grok'],['gemini_web','Gemini Web'],['uncensored','Venice']];function stIcon(s){return s==='ready'?'OK':(s==='reserved'?'1% RES':(s==='cooldown'?'WAIT':(s==='disabled'?'OFF':'NONE')));}function draw(){var actv=st.act!=null?st.act:0,mx=st.max!=null?st.max:4,st24=st.st24;sub.textContent=(st.why||'Ready')+' · Slots '+actv+'/'+mx+(st24!=null?' · 24h '+st24+' steps':'');md.textContent=st.mlbl||st.mode||'balanced';var cur=st.eng||'agy',sh='';for(var i=0;i<ENGS.length;i++){var e=ENGS[i];sh+="<button type='button' class='pill"+(cur===e[0]?' on':'')+"' data-e='"+e[0]+"'>"+e[1]+"</button>";}sw.innerHTML=sh;var arr=Array.isArray(st.pools)?st.pools:[],ph='';for(var j=0;j<arr.length;j++){var p=arr[j]||{};var meta=(p.w5||'—')+' / '+(p.w7||'—')+(p.inf?' · '+p.inf+' active':'')+(p.px===false?' · PX BLK':'');ph+="<div class='row'><div class='meta'><div class='nmr'><span class='nm'>"+esc(p.lbl||p.id||'pool')+"</span><span class='bdg'>"+esc(stIcon(p.st))+"</span></div><div class='ds mono'>"+esc(meta)+"</div></div></div>";}pools.innerHTML=ph||"<div class='empty'>No pools available.</div>";var al=Array.isArray(st.adv)?st.adv:[],ah='';for(var k=0;k<al.length;k++){var a=al[k]||{};ah+="<div class='row'><div class='meta'><div class='nm'>"+esc(a.t||'Tip')+"</div><div class='ds'>"+esc(a.d||'')+"</div></div></div>";}adv.innerHTML=ah||"<div class='empty'>All pools healthy.</div>";W.ready&&W.ready();}function run(a,p,fb){err.textContent='';act(a,p,fb).then(function(r){st=applyResp(r,st);draw();},function(e){err.textContent=em(e);});}$('ref').addEventListener('click',function(){hap('light');run('tel_refresh',{force:true},'tel:ref');});sw.addEventListener('click',function(e){var en=e.target.getAttribute('data-e');if(!en)return;hap('sel');run('tel_switch',{engine:en},'tel:sw:'+en);});bindSt(function(){st=rst();draw();});draw();W.ready&&W.ready();"#;
+    wrap_widget_html(body, js)
+}
+
+/// Build one of the 5 official Apple-HIG built-in interactive widgets (`skills`, `mcp`, `models`, `memory`, `telemetry`).
 pub fn builtin_widget(kind: &str, initial_state: Option<&Value>) -> Result<WidgetSpec> {
     let k = kind.trim().to_ascii_lowercase();
     let cd = match initial_state {
@@ -200,6 +213,12 @@ pub fn builtin_widget(kind: &str, initial_state: Option<&Value>) -> Result<Widge
             "models",
         ),
         "memory" => (memory_widget_html(), "AI Memory", "memory_hub", "memory"),
+        "telemetry" => (
+            telemetry_widget_html(),
+            "Quota & Telemetry",
+            "telemetry_hub",
+            "telemetry",
+        ),
         _ => {
             return Err(BridgeError::Validation(format!(
                 "Unknown built-in widget kind: {kind:?}"

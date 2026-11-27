@@ -60,7 +60,7 @@ pub const LEGACY_WIDGET_HANDLERS: [&str; 6] =
 pub const LEGACY_WIDGET_SLUGS: [&str; 4] =
     ["sys_status", "shared_poll", "agy_control", "ton_inspector"];
 /// Official built-in interactive hub widget kinds.
-pub const BUILTIN_WIDGET_KINDS: [&str; 4] = ["skills", "mcp", "models", "memory"];
+pub const BUILTIN_WIDGET_KINDS: [&str; 5] = ["skills", "mcp", "models", "memory", "telemetry"];
 
 const FORBIDDEN_TAGS: [&str; 14] = [
     "audio",

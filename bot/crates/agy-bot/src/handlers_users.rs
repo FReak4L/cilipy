@@ -12,7 +12,7 @@ use agy_render::md_cell;
 use tracing::warn;
 
 use crate::ctx::BotCtx;
-use crate::i18n::{owner_lang, owner_only_html, perm_label, t, tier_badge_name, Lang, Tx};
+use crate::i18n::{owner_only_html, perm_label, t, tier_badge_name, Lang, Tx};
 
 const USERS_PER_PAGE: usize = 8;
 
@@ -97,11 +97,7 @@ fn acl_user_label(u: &AclUser) -> String {
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        s.chars().take(max_chars).collect()
-    }
+    agy_core::text::truncate_chars(s, max_chars)
 }
 
 async fn sync_user_commands_for(ctx: &BotCtx, tuid: i64) {
@@ -200,7 +196,9 @@ pub async fn show_users_panel(
     flt: &str,
     page: usize,
 ) {
-    let lang = owner_lang(ctx);
+    let lang = cq
+        .map(|c| ctx.lang(c.from_user.id))
+        .unwrap_or_else(|| ctx.lang(chat_id));
     let flt_norm = match flt {
         "pending" | "approved" | "blocked" => flt,
         _ => "all",
@@ -400,7 +398,9 @@ pub async fn show_user_detail(
     chat_id: i64,
     tuid: i64,
 ) {
-    let lang = owner_lang(ctx);
+    let lang = cq
+        .map(|c| ctx.lang(c.from_user.id))
+        .unwrap_or_else(|| ctx.lang(chat_id));
     let Some(rec) = ctx.acl.get_user(tuid) else {
         let md = format!(
             "### {} {}\n\n> `{tuid}`",
@@ -558,7 +558,9 @@ pub async fn show_users_bulk(
     chat_id: i64,
     scope_raw: &str,
 ) {
-    let lang = owner_lang(ctx);
+    let lang = cq
+        .map(|c| ctx.lang(c.from_user.id))
+        .unwrap_or_else(|| ctx.lang(chat_id));
     let target = BulkTarget::from_str(scope_raw).unwrap_or(BulkTarget::Selected);
     let scope = target.as_str();
     let all_non: Vec<AclUser> = ctx
@@ -912,7 +914,7 @@ pub async fn handle_uadm_cb(
                         &cq.id,
                         Some(&format!(
                             "{}: {}",
-                            perm_label(owner_lang(ctx), perm),
+                            perm_label(ctx.lang(uid), perm),
                             if on { "ON" } else { "OFF" }
                         )),
                         false,
@@ -938,7 +940,7 @@ pub async fn handle_uadm_cb(
             match ctx.acl.set_tier(tuid, tier, true) {
                 Ok(_) => {
                     sync_user_commands_for(ctx, tuid).await;
-                    let lbl = tier_badge_name(owner_lang(ctx), tier);
+                    let lbl = tier_badge_name(ctx.lang(uid), tier);
                     ctx.ack(&cq.id, Some(&lbl), false).await;
                     show_user_detail(ctx, Some(cq), chat_id, tuid).await;
                 }
@@ -1064,7 +1066,7 @@ pub async fn handle_uadm_cb(
             for &tid in &uids {
                 sync_user_commands_for(ctx, tid).await;
             }
-            let lbl = tier_badge_name(owner_lang(ctx), tier);
+            let lbl = tier_badge_name(ctx.lang(uid), tier);
             ctx.ack(&cq.id, Some(&format!("{lbl} ({})", uids.len())), false)
                 .await;
             show_users_bulk(ctx, Some(cq), chat_id, target.as_str()).await;

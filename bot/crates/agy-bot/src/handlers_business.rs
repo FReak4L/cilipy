@@ -395,11 +395,7 @@ pub fn message_text(m: &Message) -> String {
 }
 
 fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        s.chars().take(n).collect::<String>() + "…"
-    }
+    agy_core::text::clip_ellipsis(s, n)
 }
 
 pub fn build_prompt(owner_name: &str, contact: &str, persona: &str, history: &[HistItem]) -> String {
@@ -496,9 +492,9 @@ fn rights_summary(r: Option<&BusinessBotRights>) -> String {
 
 async fn on_connection(ctx: &Arc<BotCtx>, conn: BusinessConnection) {
     let st = state(ctx);
-    let owner = ctx.cfg.owner_id;
-    info!(conn = %conn.id, user = conn.user.id, enabled = conn.is_enabled, "business_connection update");
-    if conn.user.id != owner {
+    let conn_owner = conn.user.id;
+    info!(conn = %conn.id, user = conn_owner, enabled = conn.is_enabled, "business_connection update");
+    if !ctx.is_owner(conn_owner) {
         let first = st.mutate(|d| {
             let first = !d.foreign_notified.contains(&conn.id);
             if first {
@@ -510,17 +506,14 @@ async fn on_connection(ctx: &Arc<BotCtx>, conn: BusinessConnection) {
             first
         });
         if first {
-            let _ = ctx
-                .render
-                .send_html_simple(
-                    owner,
-                    &format!(
-                        "💼 <b>Secretary Mode</b>: {} connected this bot to their Telegram account. Ignored — the secretary only works for the owner.",
-                        esc(&conn.user.display_label())
-                    ),
-                    None,
-                )
-                .await;
+            ctx.broadcast_owners_html(
+                &format!(
+                    "💼 <b>Secretary Mode</b>: {} connected this bot to their Telegram account. Ignored — the secretary only works for the owner.",
+                    esc(&conn.user.display_label())
+                ),
+                None,
+            )
+            .await;
         }
         return;
     }
@@ -557,8 +550,8 @@ async fn on_connection(ctx: &Arc<BotCtx>, conn: BusinessConnection) {
             txt.push_str("\n⚠️ The bot has no <b>reply</b> right, so it can only draft replies to you. Enable “Reply to messages” in Settings → Telegram Business → Chatbots to allow sending.");
         }
     }
-    let mk = enabled.then(|| panel_kb(ctx, ctx.cfg.owner_id, &s));
-    let _ = ctx.render.send_html_simple(owner, &txt, mk).await;
+    let mk = enabled.then(|| panel_kb(ctx, conn_owner, &s));
+    let _ = ctx.render.send_html_simple(conn_owner, &txt, mk).await;
 }
 
 async fn connection_for(ctx: &Arc<BotCtx>, conn_id: &str) -> Option<BusinessConnection> {
@@ -573,7 +566,7 @@ async fn connection_for(ctx: &Arc<BotCtx>, conn_id: &str) -> Option<BusinessConn
         .await;
     match res {
         Ok(c) => {
-            if c.user.id == ctx.cfg.owner_id && c.is_enabled {
+            if ctx.is_owner(c.user.id) && c.is_enabled {
                 st.mutate(|d| {
                     d.connections.retain(|_, x| x.user.id != c.user.id);
                     d.connections.insert(c.id.clone(), c.clone());
@@ -598,7 +591,7 @@ fn on_deleted(ctx: &Arc<BotCtx>, d: BusinessMessagesDeleted) {
 async fn on_message(ctx: &Arc<BotCtx>, m: Message, edited: bool) {
     let Some(conn_id) = m.business_connection_id.clone() else { return };
     let Some(conn) = connection_for(ctx, &conn_id).await else { return };
-    if conn.user.id != ctx.cfg.owner_id || m.chat.kind != "private" {
+    if !ctx.is_owner(conn.user.id) || m.chat.kind != "private" {
         return;
     }
     let st = state(ctx);
@@ -674,7 +667,7 @@ async fn chat_task(ctx: Arc<BotCtx>, conn_id: String, chat_id: i64, contact: Str
                 let _ = ctx
                     .render
                     .send_html(
-                        ctx.cfg.owner_id,
+                        conn.user.id,
                         &format!("💼 Secretary hourly limit ({}) reached — new messages are not answered until the window frees up.", s.max_per_hour),
                         None,
                         None,
@@ -701,7 +694,7 @@ async fn chat_task(ctx: Arc<BotCtx>, conn_id: String, chat_id: i64, contact: Str
                 )
                 .await;
         }
-        let out = run_secretary_engine(&ctx, prompt).await;
+        let out = run_secretary_engine(&ctx, conn.user.id, prompt).await;
         drop(permit);
         // the owner answered personally while we were thinking → drop our reply
         let owner_replied = st.owner_last.get(&chat_id).is_some_and(|t| *t >= started);
@@ -715,7 +708,7 @@ async fn chat_task(ctx: Arc<BotCtx>, conn_id: String, chat_id: i64, contact: Str
                     let _ = ctx
                         .render
                         .send_html_simple(
-                            ctx.cfg.owner_id,
+                            conn.user.id,
                             &format!(
                                 "⚠️ <b>Secretary paused</b> after {n} failed runs in a row. Last error: <code>{}</code>\nTurn it back on in /secretary.",
                                 esc(&clip(&e, 300))
@@ -757,7 +750,7 @@ async fn chat_task(ctx: Arc<BotCtx>, conn_id: String, chat_id: i64, contact: Str
     }
 }
 
-async fn run_secretary_engine(ctx: &Arc<BotCtx>, prompt: String) -> Result<String, String> {
+async fn run_secretary_engine(ctx: &Arc<BotCtx>, owner: i64, prompt: String) -> Result<String, String> {
     let ws = secretary_workspace(&ctx.cfg.state_dir);
     let lim = ctx.jobs.runtime_limits();
     let req = EngineRequest {
@@ -781,7 +774,6 @@ async fn run_secretary_engine(ctx: &Arc<BotCtx>, prompt: String) -> Result<Strin
             max_tools_per_min: lim.max_tools_per_min,
         },
     };
-    let owner = ctx.cfg.owner_id;
     let sink: Arc<dyn Fn(Progress) + Send + Sync> = Arc::new(|_p| {});
     let on_handle: Arc<dyn Fn(Option<JobStopHandle>) + Send + Sync> = Arc::new(|_h| {});
     let stop: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| false);
@@ -832,7 +824,7 @@ async fn deliver(
     reply: String,
     action: &Action,
 ) {
-    let owner = ctx.cfg.owner_id;
+    let owner = conn.user.id;
     if matches!(action, Action::Auto) {
         match send_business(ctx, &conn.id, chat_id, reply_to, &reply).await {
             Ok(()) => {

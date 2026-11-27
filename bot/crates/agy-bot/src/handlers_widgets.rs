@@ -145,9 +145,12 @@ pub fn webapp_url_for(ctx: &BotCtx, wid: &str) -> Option<String> {
     }
 }
 
-/// Construct one of the 4 official built-in widgets hydrated with live state for `uid`.
+/// Construct one of the 5 official built-in widgets hydrated with live state for `uid`.
 pub async fn build_builtin_widget(ctx: &Arc<BotCtx>, kind: &str, uid: i64) -> Result<WidgetSpec> {
     let k = kind.trim().to_ascii_lowercase();
+    if k == "telemetry" && !ctx.is_owner(uid) {
+        return Err(BridgeError::PermissionDenied("Owner permission required".to_string()));
+    }
     let (compact_cd, _) = build_widget_states(ctx, &k, uid, None, "", 0, "all").await?;
     builtin_widget(&k, Some(&compact_cd))
 }
@@ -159,6 +162,7 @@ fn builtin_widget_kind_for(slug_or_handler: Option<&str>) -> Option<&'static str
         "mcp_hub" | "mcp" => Some("mcp"),
         "models_hub" | "models" => Some("models"),
         "memory_hub" | "memory" => Some("memory"),
+        "telemetry_hub" | "telemetry" => Some("telemetry"),
         _ => None,
     }
 }
@@ -803,7 +807,7 @@ pub async fn show_widget_menu(
     ]
     .join("\n");
 
-    let mk = BotCtx::kb(vec![
+    let mut rows = vec![
         vec![
             ctx.btn("skills", "Skills", Some("wmenu:send:skills"), Some("primary"), None),
             ctx.btn("mcp", "MCP", Some("wmenu:send:mcp"), Some("primary"), None),
@@ -812,11 +816,20 @@ pub async fn show_widget_menu(
             ctx.btn("model", "Models", Some("wmenu:send:models"), None, None),
             ctx.btn("doc", "Memory", Some("wmenu:send:memory"), None, None),
         ],
-        vec![
+    ];
+    if ctx.is_owner(uid) {
+        rows.push(vec![
+            ctx.btn("status", "📊 Quota & Telemetry", Some("wmenu:send:telemetry"), None, None),
+            ctx.btn("folder", "Tracked", Some("wmenu:list"), None, None),
+        ]);
+        rows.push(vec![ctx.btn("menu", t(lang, Tx::BtnMenu), Some("home"), None, None)]);
+    } else {
+        rows.push(vec![
             ctx.btn("folder", "Tracked", Some("wmenu:list"), None, None),
             ctx.btn("menu", t(lang, Tx::BtnMenu), Some("home"), None, None),
-        ],
-    ]);
+        ]);
+    }
+    let mk = BotCtx::kb(rows);
 
     let mid = cq.and_then(|c| c.message.as_ref()).map(|m| m.message_id);
     if let Err(err) = ctx
@@ -1145,6 +1158,10 @@ pub async fn handle_widget_cb(
     }
 
     if let Some(kind) = data.strip_prefix("wmenu:send:") {
+        if kind == "telemetry" && !ctx.is_owner(uid) {
+            ctx.ack(&cq.id, Some("Owner permission required"), true).await;
+            return true;
+        }
         ctx.ack(&cq.id, None, false).await;
         if BUILTIN_WIDGET_KINDS.contains(&kind) {
             if let Ok(sp) = build_builtin_widget(ctx, kind, uid).await {
@@ -1203,6 +1220,7 @@ pub async fn handle_widget_cb(
                 "mcp" => "mcp:ref",
                 "models" => "mdl:ref",
                 "memory" => "mem:ref",
+                "telemetry" => "tel:ref",
                 _ => act,
             }
         } else {
@@ -1660,7 +1678,7 @@ pub async fn consume_startup_widget_once(
         }
         None => {
             let _ = approved_uids;
-            vec![ctx.cfg.owner_id]
+            ctx.owner_ids()
         }
     };
 

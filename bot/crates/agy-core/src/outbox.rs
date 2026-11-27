@@ -17,10 +17,7 @@ use crate::error::{BridgeError, Result};
 pub const DEFAULT_MAX_AGE_SECS: f64 = 6.0 * 3600.0;
 
 fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    crate::text::now_secs()
 }
 
 /// AWS "full jitter": `uniform(0, min(cap_secs, base_secs * 2^attempt))`.

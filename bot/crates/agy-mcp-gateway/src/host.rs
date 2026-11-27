@@ -36,6 +36,11 @@ pub struct HostModelRunResult {
 pub trait GatewayHostBridge: Send + Sync {
     fn owner_id(&self) -> i64;
 
+    /// All configured owner Telegram user IDs (defaults to primary `owner_id()`).
+    fn owner_ids(&self) -> Vec<i64> {
+        vec![self.owner_id()]
+    }
+
     /// Send an inline OAuth 2.1 approval card to the Owner in Telegram.
     fn notify_owner_oauth<'a>(
         &'a self,
