@@ -395,17 +395,27 @@ impl Config {
         if let Some(v) = non_empty(get("AGY_BIN")) {
             cfg.agy_bin = PathBuf::from(v);
         }
+        let mut owner_from_env = false;
         if let Some(v) = non_empty(get("OWNER_ID")) {
             let ids = parse_id_list(&v)?;
             if let Some(&first) = ids.first() {
                 cfg.owner_id = first;
                 cfg.owner_ids = ids;
+                owner_from_env = true;
             }
         }
         if let Some(v) = non_empty(get("OWNER_IDS")) {
-            for id in parse_id_list(&v)? {
-                if !cfg.owner_ids.contains(&id) {
-                    cfg.owner_ids.push(id);
+            let ids = parse_id_list(&v)?;
+            if !ids.is_empty() {
+                if !owner_from_env {
+                    cfg.owner_id = ids[0];
+                    cfg.owner_ids = ids;
+                } else {
+                    for id in ids {
+                        if !cfg.owner_ids.contains(&id) {
+                            cfg.owner_ids.push(id);
+                        }
+                    }
                 }
             }
         }
@@ -984,5 +994,31 @@ mod tests {
         let cfg2 = Config::from_lookup(|k| clamp.get(k).map(|s| (*s).to_string())).unwrap();
         assert_eq!(cfg2.mcp_ro_cache_ttl_secs, 600);
         assert_eq!(cfg2.agent_tool_output_max_bytes, 4096);
+    }
+
+    #[test]
+    fn owner_ids_only_replaces_default_owner_id() {
+        let mut map = HashMap::new();
+        map.insert("OWNER_IDS", "1111, 2222");
+        let cfg = Config::from_lookup(|k| map.get(k).map(|s| (*s).to_string())).unwrap();
+        assert_eq!(cfg.owner_id, 1111);
+        assert_eq!(cfg.owner_ids, vec![1111, 2222]);
+        assert!(
+            !cfg.owner_ids.contains(&DEFAULT_OWNER_ID),
+            "DEFAULT_OWNER_ID must not leak as a ghost owner when only OWNER_IDS is configured"
+        );
+
+        let mut both = HashMap::new();
+        both.insert("OWNER_ID", "3333");
+        both.insert("OWNER_IDS", "4444, 3333");
+        let cfg_both = Config::from_lookup(|k| both.get(k).map(|s| (*s).to_string())).unwrap();
+        assert_eq!(cfg_both.owner_id, 3333);
+        assert_eq!(cfg_both.owner_ids, vec![3333, 4444]);
+
+        let mut multi = HashMap::new();
+        multi.insert("OWNER_ID", "5555, 6666");
+        let cfg_multi = Config::from_lookup(|k| multi.get(k).map(|s| (*s).to_string())).unwrap();
+        assert_eq!(cfg_multi.owner_id, 5555);
+        assert_eq!(cfg_multi.owner_ids, vec![5555, 6666]);
     }
 }

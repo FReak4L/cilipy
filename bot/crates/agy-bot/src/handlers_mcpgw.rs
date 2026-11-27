@@ -25,6 +25,7 @@ use crate::turn_profile::classify_turn_profile;
 pub struct BotGatewayHostBridge {
     ctx: Weak<BotCtx>,
     owner_id: i64,
+    owner_ids: Vec<i64>,
 }
 
 impl BotGatewayHostBridge {
@@ -32,6 +33,7 @@ impl BotGatewayHostBridge {
         Arc::new(Self {
             ctx: Arc::downgrade(ctx),
             owner_id: ctx.cfg.owner_id,
+            owner_ids: ctx.owner_ids(),
         })
     }
 }
@@ -39,6 +41,14 @@ impl BotGatewayHostBridge {
 impl GatewayHostBridge for BotGatewayHostBridge {
     fn owner_id(&self) -> i64 {
         self.owner_id
+    }
+
+    fn owner_ids(&self) -> Vec<i64> {
+        if let Some(ctx) = self.ctx.upgrade() {
+            ctx.owner_ids()
+        } else {
+            self.owner_ids.clone()
+        }
     }
 
     fn notify_owner_oauth<'a>(
@@ -78,10 +88,7 @@ impl GatewayHostBridge for BotGatewayHostBridge {
                     ctx.btn("stop", "❌ رد اتصال", Some(&format!("mcpgw:oa:no:{req_id}")), Some("danger"), None),
                 ],
             ];
-            let _ = ctx
-                .render
-                .edit_or_send_rich(self.owner_id, None, &md, Some(BotCtx::kb(rows)))
-                .await;
+            ctx.broadcast_owners_rich(&md, Some(BotCtx::kb(rows))).await;
         })
     }
 
@@ -114,10 +121,7 @@ impl GatewayHostBridge for BotGatewayHostBridge {
                 ctx.btn("ok", "✅ این سشن", Some(&format!("mcpgw:hl:s:{req_id}")), None, None),
                 ctx.btn("stop", "❌ رد", Some(&format!("mcpgw:hl:n:{req_id}")), Some("danger"), None),
             ]];
-            let _ = ctx
-                .render
-                .edit_or_send_rich(self.owner_id, None, &md, Some(BotCtx::kb(rows)))
-                .await;
+            ctx.broadcast_owners_rich(&md, Some(BotCtx::kb(rows))).await;
         })
     }
 
@@ -132,10 +136,7 @@ impl GatewayHostBridge for BotGatewayHostBridge {
             };
             let md = format!("### 🚨 {}\n\n{}", md_cell(title), detail);
             let rows = vec![vec![ctx.btn("mcp", "🌐 پنل MCP Gateway", Some("mcpgw"), Some("primary"), None)]];
-            let _ = ctx
-                .render
-                .edit_or_send_rich(self.owner_id, None, &md, Some(BotCtx::kb(rows)))
-                .await;
+            ctx.broadcast_owners_rich(&md, Some(BotCtx::kb(rows))).await;
         })
     }
 
@@ -334,14 +335,35 @@ impl GatewayHostBridge for BotGatewayHostBridge {
                     error: Some("Bot runtime unavailable".to_string()),
                 };
             };
+            struct GwInFlightGuard {
+                store: Arc<agy_core::accounts::AccountStore>,
+                id: String,
+                freed: Arc<tokio::sync::Notify>,
+            }
+            impl Drop for GwInFlightGuard {
+                fn drop(&mut self) {
+                    self.store.end(&self.id);
+                    self.freed.notify_waiters();
+                }
+            }
             let mut env_over = std::collections::BTreeMap::new();
             let mut proxy_url = None;
+            let mut _inflight_guard: Option<GwInFlightGuard> = None;
             let now = Utc::now().timestamp();
             if let Some(acct_store) = ctx.jobs.accounts() {
-                if let Some(acc) = acct_store.pick(self.owner_id, &HashSet::new()) {
-                    env_over.insert("HOME".to_string(), acc.home.to_string_lossy().into_owned());
+                if let Some(acc) = acct_store.pick_begin_with_filter(
+                    self.owner_id,
+                    &HashSet::new(),
+                    |a| !ctx.proxies.resolve_at(a.proxy_id.as_deref(), now).is_blocked(),
+                ) {
+                    let guard = GwInFlightGuard {
+                        store: Arc::clone(&acct_store),
+                        id: acc.id.clone(),
+                        freed: Arc::clone(&ctx.jobs.account_freed),
+                    };
                     let resolved = ctx.proxies.resolve_at(acc.proxy_id.as_deref(), now);
                     if resolved.is_blocked() {
+                        drop(guard);
                         return HostModelRunResult {
                             ok: false,
                             engine: "agy".to_string(),
@@ -352,12 +374,26 @@ impl GatewayHostBridge for BotGatewayHostBridge {
                             error: Some("Account sticky proxy is unavailable (fail-closed anti-ban protection)".to_string()),
                         };
                     }
+                    if !acc.is_primary() {
+                        let _ = acct_store.prepare_home(&acc);
+                    }
+                    env_over.insert("HOME".to_string(), acc.home.to_string_lossy().into_owned());
                     proxy_url = resolved.url().map(str::to_string);
+                    _inflight_guard = Some(guard);
+                } else {
+                    return HostModelRunResult {
+                        ok: false,
+                        engine: "agy".to_string(),
+                        model: req.model.unwrap_or_default(),
+                        text: String::new(),
+                        conversation_id: req.conversation_id,
+                        duration_ms: t0.elapsed().as_millis() as u64,
+                        error: Some("No Antigravity account slot is available right now (busy, cooling down, or fail-closed proxy blocked).".to_string()),
+                    };
                 }
             }
             if let Some(p) = proxy_url {
-                env_over.insert("HTTP_PROXY".to_string(), p.clone());
-                env_over.insert("HTTPS_PROXY".to_string(), p);
+                crate::jobs::inject_proxy_env(&mut env_over, &p);
             }
             let agy_bin_str = ctx.cfg.agy_bin.to_string_lossy().into_owned();
             let engine = AgyEngine::new(

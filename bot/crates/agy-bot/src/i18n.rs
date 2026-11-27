@@ -754,6 +754,13 @@ pub fn cmd_description(lang: Lang, cmd: &str) -> &'static str {
             "管理 MCP 工具服务器",
             "Управление серверами MCP",
         ],
+        "quota" => [
+            "کاکپیت سهمیه و مسیریابی استخرها",
+            "Quota cockpit & burn-rate advisor",
+            "Status et consilium quotarum",
+            "配额监控与池路由建议",
+            "Квоты и рекомендации по пулам",
+        ],
         "skills" => [
             "مرور و مدیریت مهارت‌ها",
             "Browse & manage skills",
@@ -932,9 +939,9 @@ pub fn user_lang(ctx: &BotCtx, uid: i64) -> Lang {
     lang_for(&ctx.acl, &ctx.store, uid)
 }
 
-/// Owner's preferred UI language (for startup/admin alerts).
-pub fn owner_lang(ctx: &BotCtx) -> Lang {
-    user_lang(ctx, ctx.cfg.owner_id)
+/// Preferred UI language for a specific owner UID.
+pub fn owner_lang_for(ctx: &BotCtx, uid: i64) -> Lang {
+    user_lang(ctx, uid)
 }
 
 /// Persists `uid`'s selected UI language in `UserState.extra["lang"]`.

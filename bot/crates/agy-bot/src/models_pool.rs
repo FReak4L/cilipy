@@ -8,15 +8,23 @@
 //! other account uses `$STATE_DIR/accounts/<id>/models.json` (0600).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use agy_core::accounts::{Account, PRIMARY_ACCOUNT_ID};
 use agy_core::config::Config;
 use agy_ext::engines::{parse_models, run_cmd_env, ModelInfo};
+use dashmap::DashMap;
 use tracing::{info, warn};
 
 /// Re-fetch an account's list when it is older than this.
 pub const MODELS_MAX_AGE_SECS: u64 = 6 * 3600;
+
+fn models_cache() -> &'static DashMap<PathBuf, (Option<SystemTime>, Vec<ModelInfo>)> {
+    static CACHE: OnceLock<DashMap<PathBuf, (Option<SystemTime>, Vec<ModelInfo>)>> =
+        OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
 
 pub fn models_path(state_dir: &Path, account_id: &str) -> PathBuf {
     if account_id == PRIMARY_ACCOUNT_ID {
@@ -26,11 +34,26 @@ pub fn models_path(state_dir: &Path, account_id: &str) -> PathBuf {
     }
 }
 
+/// Mtime-checked in-memory cached load of per-account models (avoids repeated disk I/O
+/// on dashboard and model-label renders while staying immediately fresh on updates).
 pub fn load(state_dir: &Path, account_id: &str) -> Vec<ModelInfo> {
-    std::fs::read_to_string(models_path(state_dir, account_id))
+    let path = models_path(state_dir, account_id);
+    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let cache = models_cache();
+    if let Some(entry) = cache.get(&path) {
+        if entry.0 == mtime {
+            return entry.1.clone();
+        }
+    }
+    let parsed = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Vec<ModelInfo>>(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(path, (mtime, parsed.clone()));
+    parsed
 }
 
 pub fn age_secs(state_dir: &Path, account_id: &str) -> Option<u64> {
@@ -84,6 +107,9 @@ pub async fn refresh_with_proxy(
             }
             if let Err(e) = agy_core::atomic::atomic_write_json(&path, &models, true) {
                 warn!(account = %account.id, error = %e, "failed to persist account models");
+            } else {
+                let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                models_cache().insert(path, (mtime, models.clone()));
             }
             info!(account = %account.id, count = models.len(), "account models refreshed");
             models
@@ -151,5 +177,21 @@ mod tests {
         let d = Path::new("/s");
         assert_eq!(models_path(d, "primary"), PathBuf::from("/s/models.json"));
         assert_eq!(models_path(d, "acc2"), PathBuf::from("/s/accounts/acc2/models.json"));
+    }
+
+    #[test]
+    fn load_caches_and_invalidates_on_file_update() {
+        let td = tempfile::TempDir::new().unwrap();
+        let p = models_path(td.path(), "primary");
+        std::fs::write(&p, r#"[{"id":"m1","name":"Model 1"}]"#).unwrap();
+        let first = load(td.path(), "primary");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, "m1");
+        // Overwrite with a distinct mtime (sleep 20ms or touch)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, r#"[{"id":"m1","name":"Model 1"},{"id":"m2","name":"Model 2"}]"#).unwrap();
+        let second = load(td.path(), "primary");
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[1].id, "m2");
     }
 }

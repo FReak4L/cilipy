@@ -752,7 +752,10 @@ fn store_record_update_rate_limit_votes_kv_webapp_and_legacy_purge() {
 
 #[test]
 fn builtins_all_4_compress_under_4096_and_pass_node_vm_sandbox() {
-    assert_eq!(BUILTIN_WIDGET_KINDS, ["skills", "mcp", "models", "memory"]);
+    assert_eq!(
+        BUILTIN_WIDGET_KINDS,
+        ["skills", "mcp", "models", "memory", "telemetry"]
+    );
 
     for legacy in ["sys", "panel", "poll", "dash", "status", "control", "wallet"] {
         assert!(builtin_widget(legacy, None).is_err());

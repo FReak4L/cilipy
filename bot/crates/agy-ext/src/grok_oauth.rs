@@ -12,7 +12,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use agy_core::atomic::atomic_write_json;
 use agy_core::error::{BridgeError, Result};
@@ -219,10 +219,7 @@ pub struct GrokModel {
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    agy_core::text::now_unix()
 }
 
 pub fn grok_oauth_client_id() -> String {

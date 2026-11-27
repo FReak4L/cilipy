@@ -40,11 +40,7 @@ fn skill_cache() -> &'static DashMap<i64, SkillBrowserCache> {
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        s.chars().take(max_chars).collect()
-    }
+    agy_core::text::truncate_chars(s, max_chars)
 }
 
 fn sync_ctx_view(ctx: &BotCtx, uid: i64, tab: &str, cache: &SkillBrowserCache) {

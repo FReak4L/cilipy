@@ -22,6 +22,7 @@ mod handlers_parallel;
 mod handlers_proxies;
 mod handlers_skills;
 mod handlers_system;
+mod handlers_telemetry;
 mod handlers_uncensored;
 mod handlers_users;
 mod handlers_widgets;
@@ -378,9 +379,14 @@ async fn run_bridge() -> anyhow::Result<()> {
     agy_ext::agent_runtime::set_agent_tool_output_cap(cfg.agent_tool_output_max_bytes);
     let store = Arc::new(StateStore::open(cfg.state_path()).context("opening StateStore")?);
     let acl = Arc::new(
-        AclStore::open(cfg.acl_path(), cfg.owner_id, &cfg.allowed_user_ids, 300)
-            .map(|acl| acl.with_extra_owners(&cfg.owner_ids))
-            .context("opening AclStore")?,
+        AclStore::open_with_owners(
+            cfg.acl_path(),
+            cfg.owner_id,
+            &cfg.owner_ids,
+            &cfg.allowed_user_ids,
+            300,
+        )
+        .context("opening AclStore")?,
     );
     let outbox = Arc::new(OutQueue::open(cfg.outbox_path()).context("opening OutQueue")?);
     // bounded Telegram flood-control waits (longer waits: queue to outbox / drop edits)
@@ -515,7 +521,7 @@ async fn run_bridge() -> anyhow::Result<()> {
                             }
                         }
                         mark_stale_user_models(&jobs_m, &store_m);
-                        alert_duplicate_accounts(&pool, &store_m, &render_m, cfg_m.owner_id).await;
+                        alert_duplicate_accounts(&pool, &store_m, &render_m, &cfg_m.owner_ids).await;
                         tokio::select! {
                             _ = tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)) => {}
                             res = models_rx.changed() => {
@@ -956,29 +962,32 @@ pub async fn on_startup(ctx: &Arc<BotCtx>) {
         .unwrap_or(0.0);
 
     let suppressed = !had_custom_notice && (now_ts - last_notice_ts) < 120.0;
+    let owners = ctx.owner_ids();
     if suppressed {
         info!("startup notice suppressed (restarted < 2 min ago)");
     } else {
-        let owner_uid = ctx.cfg.owner_id;
-        let text = custom_notice
-            .unwrap_or_else(|| startup_text(ctx, enabled_cnt, total_cnt));
         let eff = ctx.premium.effect("party");
         let mut results = serde_json::Map::new();
-        let mk = ctx.main_kb(owner_uid, false);
-        let res = ctx
-            .render
-            .send_html(owner_uid, &text, Some(mk), eff, None, false)
-            .await;
         let mut any_delivered = false;
-        let entry = match res {
-            Ok(Some(m)) => {
-                any_delivered = true;
-                json!({"ok": true, "message_id": m.message_id})
-            }
-            Ok(None) => json!({"ok": false, "error": "skipped or unavailable"}),
-            Err(err) => json!({"ok": false, "error": err.to_string()}),
-        };
-        results.insert(owner_uid.to_string(), entry);
+        for &owner_uid in &owners {
+            let text = custom_notice
+                .clone()
+                .unwrap_or_else(|| startup_text_for(ctx, owner_uid, enabled_cnt, total_cnt));
+            let mk = ctx.main_kb(owner_uid, false);
+            let res = ctx
+                .render
+                .send_html(owner_uid, &text, Some(mk), eff, None, false)
+                .await;
+            let entry = match res {
+                Ok(Some(m)) => {
+                    any_delivered = true;
+                    json!({"ok": true, "message_id": m.message_id})
+                }
+                Ok(None) => json!({"ok": false, "error": "skipped or unavailable"}),
+                Err(err) => json!({"ok": false, "error": err.to_string()}),
+            };
+            results.insert(owner_uid.to_string(), entry);
+        }
         if had_custom_notice && any_delivered {
             let _ = std::fs::remove_file(&notice_path);
         }
@@ -990,14 +999,13 @@ pub async fn on_startup(ctx: &Arc<BotCtx>) {
             .set_meta("last_startup_results", Value::Object(results));
     }
 
-    let owner_only_slice = [ctx.cfg.owner_id];
-    if let Err(err) = handlers_widgets::consume_startup_widget_once(ctx, &owner_only_slice).await {
+    if let Err(err) = handlers_widgets::consume_startup_widget_once(ctx, &owners).await {
         warn!(error = %err, "consume_startup_widget_once failed");
     }
 }
 
-fn startup_text(ctx: &BotCtx, enabled: usize, total: usize) -> String {
-    let lang = i18n::owner_lang(ctx);
+fn startup_text_for(ctx: &BotCtx, uid: i64, enabled: usize, total: usize) -> String {
+    let lang = i18n::owner_lang_for(ctx, uid);
     let now = Local::now();
     let skills_count = ctx.list_installed_skills().len();
     format!(
@@ -1084,6 +1092,9 @@ fn is_ui_nav_callback(update: &Update) -> bool {
         || d.starts_with("upd:")
         || d.starts_with("hub:")
         || d.starts_with("par:")
+        || d.starts_with("qsw:")
+        || d.starts_with("quota:")
+        || d == "quota"
 }
 
 /// Top-level Telegram update router applying `AuthGate` first and dispatching to domain handlers.
@@ -1101,10 +1112,7 @@ pub async fn dispatch_update(ctx: &Arc<BotCtx>, mut update: Update) {
         AuthDecision::Drop => return,
         AuthDecision::NotifyOwnerStart(rec) => {
             let (txt, mk) = owner_start_notice_card(&rec, &ctx.premium);
-            let _ = ctx
-                .render
-                .send_html_simple(ctx.cfg.owner_id, &txt, Some(mk))
-                .await;
+            ctx.broadcast_owners_html(&txt, Some(mk)).await;
             return;
         }
         AuthDecision::Allowed(rec) => {
@@ -1116,6 +1124,7 @@ pub async fn dispatch_update(ctx: &Arc<BotCtx>, mut update: Update) {
     };
 
     // Phase 3 per-UID Telegram anti-flood guard (exempts /stop and cancel controls).
+    // Uses dedicated `tg_nav_rl` for UI navigation callbacks to avoid mixed-scale interference on `tg_rl`.
     if ctx.tg_rl.is_enabled() && !is_rate_limit_exempt(&update) {
         let cost = if update.message.as_ref().is_some_and(has_media_attachment) {
             2
@@ -1123,12 +1132,11 @@ pub async fn dispatch_update(ctx: &Arc<BotCtx>, mut update: Update) {
             1
         };
         let base_scale = if ctx.is_owner(actor_uid) { 3.0 } else { 1.0 };
-        let scale = if is_ui_nav_callback(&update) {
-            base_scale * 3.0
+        let rl = if is_ui_nav_callback(&update) {
+            ctx.tg_nav_rl.check_scaled(actor_uid, cost, base_scale)
         } else {
-            base_scale
+            ctx.tg_rl.check_scaled(actor_uid, cost, base_scale)
         };
-        let rl = ctx.tg_rl.check_scaled(actor_uid, cost, scale);
         if !rl.allowed {
             warn!(
                 uid = actor_uid,
@@ -1285,6 +1293,57 @@ async fn handle_callback(ctx: &Arc<BotCtx>, cq: &CallbackQuery) {
         return;
     }
 
+    if let Some(target_eng) = data.strip_prefix("qsw:") {
+        let allowed = match target_eng {
+            "grok" => ctx.has_perm(uid, "grok"),
+            "gemini_web" | "uncensored" => ctx.has_perm(uid, "uncensored"),
+            "agy" => true,
+            _ => false,
+        };
+        if !allowed {
+            ctx.ack(&cq.id, Some("Permission denied"), true).await;
+            return;
+        }
+        let _ = Box::pin(ctx.jobs.stop_user(uid)).await;
+        let _ = ctx.store.update_user(uid, |u| {
+            if target_eng == "agy" {
+                u.extra.remove("engine");
+                if u.model.as_deref().is_some_and(|m| {
+                    agy_ext::grok_oauth::is_grok_model(m)
+                        || agy_ext::uncensored::is_uncensored_model(m)
+                }) {
+                    u.model = None;
+                }
+            } else {
+                u.extra.insert("engine".to_string(), json!(target_eng));
+            }
+        });
+        let label = match target_eng {
+            "grok" => "⚡ Grok OAuth",
+            "gemini_web" => "💎 Gemini Manager",
+            "uncensored" => "🔥 Venice Uncensored",
+            _ => "🤖 Antigravity",
+        };
+        let is_fa = matches!(ctx.lang(uid), i18n::Lang::Fa);
+        let toast = if is_fa {
+            format!("سوییچ شد به {label}")
+        } else {
+            format!("Switched to {label}")
+        };
+        ctx.ack(&cq.id, Some(&toast), false).await;
+        let msg_html = if is_fa {
+            format!(
+                "✅ <b>موتور فعال شما به {label} تغییر کرد.</b>\n<i>صف قبلی لغو شد — پیام خود را ارسال کنید تا فوراً روی استخر آزاد اجرا شود.</i>"
+            )
+        } else {
+            format!(
+                "✅ <b>Active engine switched to {label}.</b>\n<i>Previous queue wait cancelled — send your prompt to run immediately on this pool.</i>"
+            )
+        };
+        let _ = ctx.render.send_html_simple(chat_id, &msg_html, None).await;
+        return;
+    }
+
     if let Some(rest) = data.strip_prefix("mpk:") {
         let (nonce, choice) = rest.split_once(':').unwrap_or((rest, ""));
         let toast = ctx.jobs.resolve_model_pick(uid, nonce, choice).unwrap_or("This choice has expired");
@@ -1295,6 +1354,9 @@ async fn handle_callback(ctx: &Arc<BotCtx>, cq: &CallbackQuery) {
         return;
     }
     if Box::pin(handlers_accounts::handle_acct_cb(ctx, cq, uid, chat_id, data)).await {
+        return;
+    }
+    if Box::pin(handlers_telemetry::handle_quota_cb(ctx, cq, uid, chat_id, data)).await {
         return;
     }
     if Box::pin(handlers_proxies::handle_px_cb(ctx, cq, uid, chat_id, data)).await {
@@ -1497,12 +1559,12 @@ fn mark_stale_user_models(jobs: &Arc<JobManager>, store: &Arc<StateStore>) {
     }
 }
 
-/// Tell the owner (once per set) when two pool accounts share one Google e-mail.
+/// Tell all owners (once per set) when two pool accounts share one Google e-mail.
 async fn alert_duplicate_accounts(
     pool: &Arc<agy_core::accounts::AccountStore>,
     store: &Arc<StateStore>,
     render: &Arc<RenderBridge>,
-    owner: i64,
+    owners: &[i64],
 ) {
     let groups = pool.duplicate_groups();
     let key: Vec<String> = groups.iter().map(|g| g.join("+")).collect();
@@ -1516,16 +1578,13 @@ async fn alert_duplicate_accounts(
         return;
     }
     let list: Vec<String> = groups.iter().map(|g| format!("<code>{}</code>", g.join("</code> = <code>"))).collect();
-    let _ = render
-        .send_html_simple(
-            owner,
-            &format!(
-                "⚠️ <b>Duplicate accounts in the pool</b>\n{}\nThese are signed in with the same Google e-mail, so they share one quota. Nothing was removed — remove the extra one from /accounts if you want.",
-                list.join("\n")
-            ),
-            None,
-        )
-        .await;
+    let html = format!(
+        "⚠️ <b>Duplicate accounts in the pool</b>\n{}\nThese are signed in with the same Google e-mail, so they share one quota. Nothing was removed — remove the extra one from /accounts if you want.",
+        list.join("\n")
+    );
+    for &owner in owners {
+        let _ = render.send_html_simple(owner, &html, None).await;
+    }
 }
 
 fn parse_slash_command(raw_text: &str) -> Option<(String, String)> {
@@ -1596,7 +1655,17 @@ async fn dispatch_slash_command(ctx: &Arc<BotCtx>, msg: &Message, raw_text: &str
             | "fleet"
             | "sysupdate"
             | "mcp"
+            | "mcpgw"
+            | "mcpgateway"
             | "widget"
+            | "quota"
+            | "telemetry"
+            | "venice"
+            | "webmodel"
+            | "gemini"
+            | "gems"
+            | "gbot"
+            | "grokbot"
     );
     if !is_known {
         return false;
@@ -1646,6 +1715,7 @@ async fn dispatch_slash_command(ctx: &Arc<BotCtx>, msg: &Message, raw_text: &str
         "cron" => handlers_system::cmd_cron(ctx, msg, &arg).await,
         "users" => handlers_users::cmd_users(ctx, msg).await,
         "accounts" => handlers_accounts::cmd_accounts(ctx, msg).await,
+        "quota" | "telemetry" => Box::pin(handlers_telemetry::cmd_quota(ctx, msg, &arg)).await,
         "parallel" => handlers_parallel::cmd_parallel(ctx, msg, &arg).await,
         "skills" => handlers_skills::cmd_skills(ctx, msg).await,
         "skillhub" | "hub" => handlers_skillhub::cmd_skillhub(ctx, msg, &arg).await,
@@ -2126,7 +2196,7 @@ mod tests {
     #[test]
     fn check_and_bench_ab_succeed_with_valid_outputs() {
         let chk = check_builtin_widgets().unwrap();
-        assert_eq!(chk["builtins"], json!(4));
+        assert_eq!(chk["builtins"], json!(5));
 
         let ab = run_ab_benchmark().unwrap();
         assert!(ab["cold_startup_ms"].as_f64().unwrap() >= 0.0);

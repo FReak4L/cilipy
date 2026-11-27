@@ -36,11 +36,7 @@ fn mcp_rendered_epoch() -> &'static DashMap<McpCacheKey, u64> {
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        s.chars().take(max_chars).collect()
-    }
+    agy_core::text::truncate_chars(s, max_chars)
 }
 
 fn load_sorted_servers(ctx: &BotCtx) -> Vec<McpServerView> {
@@ -502,7 +498,7 @@ async fn handle_mreq_decision(
         );
         let rows = vec![vec![ctx.btn("mcp", "سرورهای MCP", Some("mcp"), None, None)]];
         send_rich_card(ctx, Some(cq), chat_id, &md, rows).await;
-        if rec.chat_id != 0 && rec.chat_id != ctx.cfg.owner_id {
+        if rec.chat_id != 0 && rec.chat_id != chat_id {
             let notice = format!(
                 "### {} درخواست نصب MCP رد شد\n\n> شناسه: `{}`",
                 ctx.premium.md("err"),
@@ -529,9 +525,9 @@ async fn handle_mreq_decision(
     let req_chat = if rec.chat_id != 0 {
         rec.chat_id
     } else {
-        ctx.cfg.owner_id
+        chat_id
     };
-    if req_chat != ctx.cfg.owner_id {
+    if req_chat != chat_id {
         let notice = format!(
             "### {} درخواست نصب MCP تایید شد\n\n> شناسه: `{}` — در حال نصب است.",
             ctx.premium.md("ok"),
@@ -1323,10 +1319,7 @@ pub async fn handle_mcp_awaiting_text(
                             None,
                         ),
                     ]]);
-                    let _ = ctx
-                        .render
-                        .send_rich_card_message(ctx.cfg.owner_id, &owner_md, Some(owner_mk))
-                        .await;
+                    ctx.broadcast_owners_rich(&owner_md, Some(owner_mk)).await;
 
                     let user_md = format!(
                         "### {} درخواست نصب MCP ثبت شد\n\n> شناسه: `{}` — منتظر تایید مالک.",

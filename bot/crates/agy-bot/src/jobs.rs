@@ -15,9 +15,10 @@ use agy_core::accounts::{
     classify_failure, format_tokens_compact, Account, AccountStore, FailureAction, FailureClass,
     HealthStatus,
 };
-use agy_core::acl::AclStore;
+use agy_core::acl::{AclStore, RoleTier};
 use agy_core::config::{Config, EngineKind as CoreEngineKind};
 use agy_core::proxies::{ProxyRegistry, ResolvedProxy};
+use agy_core::security::{KeyedTokenBucket, RateLimitResult, DEFAULT_MAX_BUCKET_KEYS};
 use agy_core::store::{StateStore, UserState};
 use agy_core::tg::{InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage};
 use agy_core::{BridgeError, Result};
@@ -47,6 +48,8 @@ use crate::handoff::{self, Continuity};
 pub mod parallel;
 #[path = "model_pick.rs"]
 pub mod model_pick;
+#[path = "scheduler.rs"]
+pub mod scheduler;
 use model_pick::{ModelDecision, ModelWait};
 use crate::render_bridge::RenderBridge;
 
@@ -62,10 +65,7 @@ pub const AWAITING_INPUT_TTL_SECS: f64 = 900.0;
 static NEXT_REQ_COUNTER: AtomicI64 = AtomicI64::new(1);
 
 fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    agy_core::text::now_secs()
 }
 
 fn generate_req_id() -> i64 {
@@ -169,6 +169,7 @@ pub enum EnqueueOutcome {
     StartedImmediately,
     Queued(usize),
     QueueFull,
+    RateLimited,
 }
 
 /// Public snapshot of an actively running user job.
@@ -1074,11 +1075,16 @@ fn account_reason(
 
 /// Concurrent job supervisor managing per-user serialized queues, security boundaries,
 /// live draft streaming, cancellation, and delivery.
-/// Holds one in-flight slot on an account; released on drop (also when the task is aborted).
-pub(crate) struct InFlightGuard(pub(crate) Arc<AccountStore>, pub(crate) String);
+/// Holds one in-flight slot on an account; released on drop and wakes waiting tasks immediately.
+pub(crate) struct InFlightGuard(
+    pub(crate) Arc<AccountStore>,
+    pub(crate) String,
+    pub(crate) Arc<tokio::sync::Notify>,
+);
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.0.end(&self.1);
+        self.2.notify_waiters();
     }
 }
 
@@ -1137,6 +1143,12 @@ fn default_runtime_global_jobs() -> usize {
 fn default_runtime_queue_per_user() -> usize {
     MAX_QUEUE_PER_USER
 }
+fn default_ai_burst_per_min() -> u32 {
+    12
+}
+fn default_ai_burst_cap() -> u32 {
+    8
+}
 
 /// Runtime-tunable execution guard & safety limit knobs (hydrated from `Config` + `StateStore` meta).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1151,6 +1163,10 @@ pub struct RuntimeLimits {
     pub max_global_ai_jobs: usize,
     #[serde(default = "default_runtime_queue_per_user")]
     pub max_queue_per_user: usize,
+    #[serde(default = "default_ai_burst_per_min")]
+    pub ai_burst_per_min: u32,
+    #[serde(default = "default_ai_burst_cap")]
+    pub ai_burst_cap: u32,
 }
 
 impl RuntimeLimits {
@@ -1164,6 +1180,8 @@ impl RuntimeLimits {
             outbox_secret_scan: cfg.outbox_secret_scan,
             max_global_ai_jobs: cfg.max_global_ai_jobs.clamp(1, 32),
             max_queue_per_user: MAX_QUEUE_PER_USER,
+            ai_burst_per_min: default_ai_burst_per_min(),
+            ai_burst_cap: default_ai_burst_cap(),
         }
     }
 
@@ -1183,19 +1201,11 @@ impl RuntimeLimits {
         }
         self.max_global_ai_jobs = self.max_global_ai_jobs.clamp(1, 32);
         self.max_queue_per_user = self.max_queue_per_user.clamp(1, 10);
+        if self.ai_burst_per_min > 0 {
+            self.ai_burst_per_min = self.ai_burst_per_min.clamp(2, 60);
+        }
+        self.ai_burst_cap = self.ai_burst_cap.clamp(1, 20);
         self
-    }
-}
-
-struct GlobalSlotGuard {
-    active: Arc<std::sync::atomic::AtomicUsize>,
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl Drop for GlobalSlotGuard {
-    fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::AcqRel);
-        self.notify.notify_waiters();
     }
 }
 
@@ -1216,10 +1226,11 @@ pub struct JobManager {
     parallel_runs: DashMap<String, Arc<parallel::ParallelRun>>,
     model_waits: DashMap<i64, Arc<ModelWait>>,
     model_choice: DashMap<(i64, String, String), String>,
-    model_pick_lock: tokio::sync::Mutex<()>,
+    model_pick_locks: DashMap<i64, Arc<tokio::sync::Mutex<()>>>,
     model_pick_timeout: std::sync::atomic::AtomicU64,
-    active_global: Arc<std::sync::atomic::AtomicUsize>,
-    global_slot_notify: Arc<tokio::sync::Notify>,
+    slot_pool: Arc<scheduler::PrioritySlotPool>,
+    pub(crate) account_freed: Arc<tokio::sync::Notify>,
+    ai_burst_rl: Arc<KeyedTokenBucket<i64>>,
     runtime_limits: RwLock<RuntimeLimits>,
     #[allow(clippy::type_complexity)]
     mem_probe: RwLock<Option<Arc<dyn Fn() -> Option<u64> + Send + Sync>>>,
@@ -1263,6 +1274,14 @@ impl JobManager {
         {
             initial_limits.max_global_ai_jobs = cfg.max_global_ai_jobs.clamp(1, 32);
         }
+        let slot_pool = Arc::new(scheduler::PrioritySlotPool::new(
+            initial_limits.max_global_ai_jobs,
+        ));
+        let ai_burst_rl = Arc::new(KeyedTokenBucket::new(
+            initial_limits.ai_burst_per_min,
+            initial_limits.ai_burst_cap,
+            DEFAULT_MAX_BUCKET_KEYS,
+        ));
         Self {
             cfg,
             acl,
@@ -1280,10 +1299,11 @@ impl JobManager {
             parallel_runs: DashMap::new(),
             model_waits: DashMap::new(),
             model_choice: DashMap::new(),
-            model_pick_lock: tokio::sync::Mutex::new(()),
+            model_pick_locks: DashMap::new(),
             model_pick_timeout: std::sync::atomic::AtomicU64::new(model_pick::MODEL_PICK_TIMEOUT_SECS),
-            active_global: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            global_slot_notify: Arc::new(tokio::sync::Notify::new()),
+            slot_pool,
+            account_freed: Arc::new(tokio::sync::Notify::new()),
+            ai_burst_rl,
             runtime_limits: RwLock::new(initial_limits),
             mem_probe: RwLock::new(None),
         }
@@ -1307,7 +1327,9 @@ impl JobManager {
         if let Ok(v) = serde_json::to_value(&clean) {
             let _ = self.store.set_meta("runtime_limits", v);
         }
-        self.global_slot_notify.notify_waiters();
+        self.slot_pool.set_limit(clean.max_global_ai_jobs);
+        self.ai_burst_rl
+            .set_rate(clean.ai_burst_per_min, clean.ai_burst_cap);
         clean
     }
 
@@ -1319,34 +1341,163 @@ impl JobManager {
 
     /// Number of currently occupied global AI execution slots (`<= max_global_jobs()`).
     pub fn active_global_jobs(&self) -> usize {
-        self.active_global.load(Ordering::Acquire)
+        self.slot_pool.active_count()
     }
 
     /// Configured server-wide cap on concurrent AI jobs (`RuntimeLimits::max_global_ai_jobs`).
     pub fn max_global_jobs(&self) -> usize {
-        self.runtime_limits().max_global_ai_jobs.clamp(1, 32)
+        self.slot_pool.limit()
     }
 
-    fn try_acquire_global_slot(&self) -> Option<GlobalSlotGuard> {
-        let limit = self.max_global_jobs();
-        let mut cur = self.active_global.load(Ordering::Acquire);
-        loop {
-            if cur >= limit {
-                return None;
-            }
-            match self.active_global.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(GlobalSlotGuard {
-                        active: Arc::clone(&self.active_global),
-                        notify: Arc::clone(&self.global_slot_notify),
-                    });
+    /// Number of currently waiting requests in the global priority slot queue.
+    pub fn queued_global_jobs(&self) -> usize {
+        self.slot_pool.queued_count()
+    }
+
+    /// Snapshot of actively running global slots (for owner diagnostics & telemetry).
+    pub fn active_slots_snapshot(&self) -> Vec<scheduler::ActiveSlotMeta> {
+        self.slot_pool.active_snapshot()
+    }
+
+    /// Check per-tier monotonic AI-job burst bucket for `uid`.
+    pub fn check_ai_burst(&self, uid: i64) -> RateLimitResult {
+        if !self.ai_burst_rl.is_enabled() {
+            return RateLimitResult {
+                allowed: true,
+                retry_after_secs: 0,
+                remaining: u32::MAX,
+            };
+        }
+        let scale = match self.acl.tier_of(uid) {
+            RoleTier::Owner => 1.0,
+            RoleTier::Admin => 0.67,
+            RoleTier::User => 0.34,
+        };
+        self.ai_burst_rl.check_scaled(uid, 1, scale)
+    }
+
+    /// Inline keyboard for waiting/queued status cards: Owners get instant overflow pool buttons + Cancel;
+    /// non-owners get ONLY Cancel (zero internal pool exposure).
+    fn busy_kb_for(&self, uid: i64) -> InlineKeyboardMarkup {
+        let lang = crate::i18n::lang_for(&self.acl, &self.store, uid);
+        let is_fa = matches!(lang, crate::i18n::Lang::Fa);
+        let cancel_lbl = if is_fa { "✖ لغو صف" } else { "✖ Cancel Queue" };
+        let cancel_btn = self
+            .render
+            .premium()
+            .callback_button(Some("stop"), cancel_lbl, "stop")
+            .with_style("danger");
+        if !self.acl.is_owner(uid) {
+            return InlineKeyboardMarkup::new(vec![vec![cancel_btn]]);
+        }
+        let mut alt_row = Vec::new();
+        if self.acl.has_perm(uid, "grok") {
+            alt_row.push(
+                self.render
+                    .premium()
+                    .callback_button(Some("grok"), "⚡ Grok", "qsw:grok")
+                    .with_style("primary"),
+            );
+        }
+        if self.acl.has_perm(uid, "uncensored") {
+            alt_row.push(
+                self.render
+                    .premium()
+                    .callback_button(Some("gemini"), "💎 Gemini Web", "qsw:gemini_web"),
+            );
+        }
+        let mut rows = Vec::new();
+        if !alt_row.is_empty() {
+            rows.push(alt_row);
+        }
+        rows.push(vec![cancel_btn]);
+        InlineKeyboardMarkup::new(rows)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_global_slot_for(
+        &self,
+        uid: i64,
+        chat_id: i64,
+        user_label: &str,
+        engine_hint: &str,
+        active_entry: &Arc<ActiveJobEntry>,
+        cancel_rx: &mut watch::Receiver<bool>,
+    ) -> Option<scheduler::GlobalSlotPermit> {
+        let tier = self.acl.tier_of(uid);
+        match self.slot_pool.acquire_or_enqueue(
+            uid,
+            user_label.to_string(),
+            tier,
+            engine_hint.to_string(),
+        ) {
+            scheduler::AcquireOutcome::Immediate(permit) => Some(permit),
+            scheduler::AcquireOutcome::Queued {
+                waiter_id,
+                mut rx,
+                queue_pos,
+                active_snapshot,
+            } => {
+                let lang = crate::i18n::lang_for(&self.acl, &self.store, uid);
+                let is_owner = self.acl.is_owner(uid);
+                let html = scheduler::format_busy_status_html(
+                    is_owner,
+                    uid,
+                    lang,
+                    &active_snapshot,
+                    self.active_global_jobs(),
+                    self.max_global_jobs(),
+                    queue_pos,
+                    tier,
+                    None,
+                );
+                let wait_msg_id = self
+                    .render
+                    .send_html(
+                        chat_id,
+                        &html,
+                        Some(self.busy_kb_for(uid)),
+                        None,
+                        Some(true),
+                        false,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|m| m.message_id);
+
+                let acquired = if active_entry.stop_requested.load(Ordering::SeqCst) {
+                    self.slot_pool.cancel_waiter(waiter_id);
+                    None
+                } else {
+                    tokio::select! {
+                        res = &mut rx => res.ok(),
+                        _ = cancel_rx.changed() => {
+                            self.slot_pool.cancel_waiter(waiter_id);
+                            None
+                        }
+                    }
+                };
+
+                if let Some(mid) = wait_msg_id {
+                    let _ = self.client.delete_message(chat_id, mid).await;
                 }
-                Err(actual) => cur = actual,
+                match acquired {
+                    Some(p) if !active_entry.stop_requested.load(Ordering::SeqCst) => Some(p),
+                    _ => {
+                        let is_fa = matches!(lang, crate::i18n::Lang::Fa);
+                        let cancelled_txt = if is_fa {
+                            "⏹ <i>درخواست در صف انتظار لغو شد.</i>"
+                        } else {
+                            "⏹ <i>Cancelled while waiting in queue.</i>"
+                        };
+                        let _ = self
+                            .render
+                            .send_html_simple(chat_id, cancelled_txt, None)
+                            .await;
+                        None
+                    }
+                }
             }
         }
     }
@@ -1384,6 +1535,17 @@ impl JobManager {
             reg.resolve(a.proxy_id.as_deref()),
             ResolvedProxy::Blocked { .. }
         )
+    }
+
+    /// Resolve Grok's fail-closed sticky egress proxy (shared by Grok OAuth & Grok Bot paths).
+    pub(crate) fn resolve_grok_proxy_or_err(&self) -> Result<Option<String>> {
+        match self.proxies().map(|r| r.resolve_grok()) {
+            Some(ResolvedProxy::Blocked { reason, .. }) => Err(BridgeError::Network(format!(
+                "Grok sticky proxy blocked (fail-closed): {reason}. Check /proxies."
+            ))),
+            Some(ResolvedProxy::Use { url, .. }) => Ok(Some(url)),
+            _ => Ok(None),
+        }
     }
 
     /// Attach a [`JobWidgetSink`] for extracting inline markdown widgets and outbox widget files.
@@ -1641,6 +1803,28 @@ impl JobManager {
     /// Enqueue a prompt/file job on `req.uid`'s serialized per-user worker.
     pub async fn enqueue(self: &Arc<Self>, req: JobRequest) -> Result<EnqueueOutcome> {
         let uid = req.uid;
+        if !req.overrides.owner_approved_mcp {
+            let burst = self.check_ai_burst(uid);
+            if !burst.allowed {
+                let lang = crate::i18n::lang_for(&self.acl, &self.store, uid);
+                let is_fa = matches!(lang, crate::i18n::Lang::Fa);
+                let msg = if is_fa {
+                    format!(
+                        "🚦 <b>محدودیت سرعت درخواست‌های هوش مصنوعی (Burst)</b>\n\
+                        لطفاً <code>{}s</code> صبر کنید و دوباره ارسال کنید.",
+                        burst.retry_after_secs.max(1)
+                    )
+                } else {
+                    format!(
+                        "🚦 <b>AI Job Burst Limit Reached</b>\n\
+                        Please wait <code>{}s</code> before sending another AI request.",
+                        burst.retry_after_secs.max(1)
+                    )
+                };
+                let _ = self.render.send_html_simple(req.chat_id, &msg, None).await;
+                return Ok(EnqueueOutcome::RateLimited);
+            }
+        }
         let mut pending_req = req;
         for _attempt in 0..2 {
             let handle = self.ensure_user_queue(uid);
@@ -1782,62 +1966,31 @@ impl JobManager {
             uid,
         };
 
-        // Server-wide concurrency cap (live RuntimeLimits::max_global_ai_jobs) with cancellable wait.
+        // Priority + aging global slot scheduler (lost-wakeup free, RBAC peer-owner busy UX).
+        let u_hint = self.store.get_user(uid);
+        let engine_hint = req
+            .overrides
+            .force_engine
+            .as_deref()
+            .or_else(|| u_hint.extra.get("engine").and_then(|v| v.as_str()))
+            .unwrap_or("agy");
         let mut cancel_slot_rx = cancel_rx.clone();
-        let _global_permit = match self.try_acquire_global_slot() {
-            Some(p) => p,
-            None => {
-                let wait_msg_id = self
-                    .render
-                    .send_html(
-                        chat_id,
-                        &format!(
-                            "⏳ <i>Server AI queue is busy ({}/{} active) — waiting for a free slot…</i>",
-                            self.active_global_jobs(),
-                            self.max_global_jobs()
-                        ),
-                        Some(self.stop_kb_for(uid)),
-                        None,
-                        Some(true),
-                        false,
-                    )
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|m| m.message_id);
-
-                let mut acquired: Option<GlobalSlotGuard> = None;
-                while acquired.is_none() && !active_entry.stop_requested.load(Ordering::SeqCst) {
-                    let notified = self.global_slot_notify.notified();
-                    if let Some(p) = self.try_acquire_global_slot() {
-                        acquired = Some(p);
-                        break;
-                    }
-                    tokio::select! {
-                        _ = notified => {
-                            acquired = self.try_acquire_global_slot();
-                        }
-                        _ = cancel_slot_rx.changed() => break,
-                    }
-                }
-                if let Some(mid) = wait_msg_id {
-                    let _ = self.client.delete_message(chat_id, mid).await;
-                }
-                match acquired {
-                    Some(p) if !active_entry.stop_requested.load(Ordering::SeqCst) => p,
-                    _ => {
-                        let _ = self
-                            .render
-                            .send_html_simple(chat_id, "⏹ <i>Cancelled while waiting in queue.</i>", None)
-                            .await;
-                        return;
-                    }
-                }
-            }
+        let Some(global_permit) = self
+            .acquire_global_slot_for(
+                uid,
+                chat_id,
+                &req.user_label,
+                engine_hint,
+                &active_entry,
+                &mut cancel_slot_rx,
+            )
+            .await
+        else {
+            return;
         };
 
         if let Err(err) = self
-            .run_job_inner(req, Arc::clone(&active_entry), cancel_rx)
+            .run_job_inner(req, Arc::clone(&active_entry), cancel_rx, Some(global_permit))
             .await
         {
             warn!(uid, error = %err, "job execution failed");
@@ -1854,6 +2007,7 @@ impl JobManager {
         req: JobRequest,
         active_entry: Arc<ActiveJobEntry>,
         mut cancel_rx: watch::Receiver<bool>,
+        mut global_permit: Option<scheduler::GlobalSlotPermit>,
     ) -> Result<()> {
         let user_state = self.store.get_user(req.uid);
         let outdir = self
@@ -2085,7 +2239,11 @@ impl JobManager {
         let mut pending_switch: Option<(String, String)> = None;
         let mut inflight: Option<InFlightGuard> = None;
 
-        let (mut res, final_progress) = if backend == "uncensored" || backend == "grok" || backend == "grok_bot" {
+        let (mut res, final_progress) = if backend == "uncensored"
+            || backend == "gemini_web"
+            || backend == "grok"
+            || backend == "grok_bot"
+        {
             let entry_cb = Arc::clone(&active_entry);
             let ui_cb = Arc::clone(&stream_ui);
             let client_cb = Arc::clone(&self.client);
@@ -2217,12 +2375,24 @@ impl JobManager {
                 )
                 .await;
 
+                let pinned_acct = crate::handlers_gemini::gemini_pinned_account(&user_state);
+                let proxies_opt = self.proxies();
+                let proxy_resolver = |pid: Option<&str>| -> std::result::Result<Option<String>, String> {
+                    match proxies_opt.as_ref().map(|reg| reg.resolve(pid)) {
+                        Some(ResolvedProxy::Use { url, .. }) => Ok(Some(url)),
+                        Some(ResolvedProxy::Blocked { reason, .. }) => Err(reason),
+                        _ => Ok(None),
+                    }
+                };
+
                 agy_ext::gemini_web::run_gemini_web_turn(
                     agy_ext::gemini_web::GeminiTurnParams {
                         prompt: &enriched_prompt,
                         model_override: model_opt.as_deref(),
                         mode,
                         gem_id: gem_id.as_deref(),
+                        pinned_account_id: pinned_acct.as_deref(),
+                        live_proxy_resolver: Some(&proxy_resolver),
                         cwd,
                         workspace_root: &self.cfg.agy_workspace,
                         outbox_dir: &outdir,
@@ -2257,15 +2427,7 @@ impl JobManager {
                 let sess_key = (!req.overrides.isolated)
                     .then(|| crate::handlers_grok::grok_session_key(req.uid));
 
-                let grok_proxy = match self.proxies().map(|r| r.resolve_grok()) {
-                    Some(ResolvedProxy::Blocked { reason, .. }) => Err(BridgeError::Network(
-                        format!(
-                            "Grok sticky proxy blocked (fail-closed): {reason}. Check /proxies."
-                        ),
-                    )),
-                    Some(ResolvedProxy::Use { url, .. }) => Ok(Some(url)),
-                    _ => Ok(None),
-                };
+                let grok_proxy = self.resolve_grok_proxy_or_err();
 
                 match grok_proxy {
                     Err(e) => Err(e),
@@ -2291,15 +2453,7 @@ impl JobManager {
                 }
             } else {
                 used_account = Some("grok-bot-oauth".to_string());
-                let grok_proxy = match self.proxies().map(|r| r.resolve_grok()) {
-                    Some(ResolvedProxy::Blocked { reason, .. }) => Err(BridgeError::Network(
-                        format!(
-                            "Grok sticky proxy blocked (fail-closed): {reason}. Check /proxies."
-                        ),
-                    )),
-                    Some(ResolvedProxy::Use { url, .. }) => Ok(Some(url)),
-                    _ => Ok(None),
-                };
+                let grok_proxy = self.resolve_grok_proxy_or_err();
 
                 match grok_proxy {
                     Err(e) => Err(e),
@@ -2408,12 +2562,14 @@ impl JobManager {
             let acct: Option<Account> = match pool.as_ref() {
                 Some(p) => {
                     let mut picked = pinned_account
-                        .take()
-                        .and_then(|id| p.pick_pinned_begin_with_filter(&id, &tried, |a| self.account_proxy_allowed(a)))
+                        .as_deref()
+                        .and_then(|id| p.pick_pinned_begin_with_filter(id, &tried, |a| self.account_proxy_allowed(a)))
                         .or_else(|| p.pick_begin_with_filter(req.uid, &tried, |a| self.account_proxy_allowed(a)));
 
-                    // Under strict_safe (max 1 concurrent run/account), if eligible accounts exist
-                    // but are currently busy with another user's job, wait politely instead of failing fast.
+                    // Under strict_safe / balanced concurrency caps, if eligible accounts exist
+                    // but are currently busy with another user's/owner's job, show RBAC-safe busy status
+                    // and wait event-driven via `account_freed` (zero lost wakeups, <1ms resume).
+                    let mut acct_wait_msg: Option<i64> = None;
                     if picked.is_none() && p.breaker_status().is_none() {
                         let wait_deadline = Instant::now() + Duration::from_secs(45);
                         while picked.is_none()
@@ -2422,17 +2578,72 @@ impl JobManager {
                         {
                             let now_i = now_secs() as i64;
                             let pol = p.policy();
-                            let any_busy_eligible = p.list().iter().any(|a| {
-                                !tried.contains(&a.id)
-                                    && a.available_at_with_policy(now_i, &pol)
-                                    && self.account_proxy_allowed(a)
-                                    && p.in_flight(&a.id) > 0
-                            });
-                            if !any_busy_eligible {
+                            let busy_ids: Vec<String> = p
+                                .list()
+                                .iter()
+                                .filter(|a| {
+                                    !tried.contains(&a.id)
+                                        && a.available_at_with_policy(now_i, &pol)
+                                        && self.account_proxy_allowed(a)
+                                        && p.in_flight(&a.id) > 0
+                                })
+                                .map(|a| a.id.clone())
+                                .collect();
+                            if busy_ids.is_empty() {
+                                break;
+                            }
+                            if acct_wait_msg.is_none() {
+                                let lang = crate::i18n::lang_for(&self.acl, &self.store, req.uid);
+                                let tier = self.acl.tier_of(req.uid);
+                                let hint = format!("Busy account(s): {}", busy_ids.join(", "));
+                                let active_snap = self.active_slots_snapshot();
+                                let html = scheduler::format_busy_status_html(
+                                    self.acl.is_owner(req.uid),
+                                    req.uid,
+                                    lang,
+                                    &active_snap,
+                                    self.active_global_jobs(),
+                                    self.max_global_jobs(),
+                                    1,
+                                    tier,
+                                    Some(&hint),
+                                );
+                                acct_wait_msg = self
+                                    .render
+                                    .send_html(
+                                        req.chat_id,
+                                        &html,
+                                        Some(self.busy_kb_for(req.uid)),
+                                        None,
+                                        Some(true),
+                                        false,
+                                    )
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|m| m.message_id);
+                            }
+                            let notified = self.account_freed.notified();
+                            tokio::pin!(notified);
+                            notified.as_mut().enable();
+                            picked = pinned_account
+                                .as_deref()
+                                .and_then(|id| {
+                                    p.pick_pinned_begin_with_filter(id, &tried, |a| {
+                                        self.account_proxy_allowed(a)
+                                    })
+                                })
+                                .or_else(|| {
+                                    p.pick_begin_with_filter(req.uid, &tried, |a| {
+                                        self.account_proxy_allowed(a)
+                                    })
+                                });
+                            if picked.is_some() {
                                 break;
                             }
                             tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_millis(1500)) => {}
+                                _ = &mut notified => {}
+                                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
                                 _ = cancel_rx.changed() => {
                                     if active_entry.stop_requested.load(Ordering::SeqCst) {
                                         break;
@@ -2442,14 +2653,38 @@ impl JobManager {
                             if p.breaker_status().is_some() {
                                 break;
                             }
-                            picked = p.pick_begin_with_filter(req.uid, &tried, |a| self.account_proxy_allowed(a));
+                            picked = pinned_account
+                                .as_deref()
+                                .and_then(|id| {
+                                    p.pick_pinned_begin_with_filter(id, &tried, |a| {
+                                        self.account_proxy_allowed(a)
+                                    })
+                                })
+                                .or_else(|| {
+                                    p.pick_begin_with_filter(req.uid, &tried, |a| {
+                                        self.account_proxy_allowed(a)
+                                    })
+                                });
                         }
+                    }
+                    if let Some(mid) = acct_wait_msg {
+                        let _ = self.client.delete_message(req.chat_id, mid).await;
+                    }
+                    if picked.is_some() {
+                        pinned_account.take();
                     }
 
                     match picked {
                     Some(a) => {
-                        // counted as in-flight from the pick on; released when dropped
-                        inflight = Some(InFlightGuard(Arc::clone(p), a.id.clone()));
+                        if let Some(ref gp) = global_permit {
+                            gp.set_target(Some(a.id.clone()), backend);
+                        }
+                        // counted as in-flight from the pick on; released when dropped (notifies waiters)
+                        inflight = Some(InFlightGuard(
+                            Arc::clone(p),
+                            a.id.clone(),
+                            Arc::clone(&self.account_freed),
+                        ));
                         if let Some((from, reason)) = pending_switch.take() {
                             let _ = self
                                 .render
@@ -2471,6 +2706,15 @@ impl JobManager {
                         Some(a)
                     }
                     None => {
+                        if active_entry.stop_requested.load(Ordering::SeqCst) {
+                            if let Some(prev) = last.take() {
+                                break prev;
+                            }
+                            if let Some(mid) = status_msg_id {
+                                let _ = self.client.delete_message(req.chat_id, mid).await;
+                            }
+                            return Ok(());
+                        }
                         if let Some(prev) = last.take() {
                             extra_notes.push(self.pool_exhausted_note(p));
                             break prev;
@@ -2545,15 +2789,52 @@ impl JobManager {
                     );
                 }
             }
-            // The account must offer the user's model; otherwise pause and let the user pick.
+            // The account must offer the user's model; otherwise release the global execution slot
+            // while waiting up to 600s for the user's pick so peer owners are never starved!
             if let (Some(_), Some(a)) = (pool.as_ref(), acct.as_ref()) {
                 if is_agy {
                     let ent = Arc::clone(&active_entry);
                     let stop = move || ent.stop_requested.load(Ordering::SeqCst);
                     let force = model_refresh_needed.remove(&a.id);
-                    match self
+                    let may_pause_for_pick = force
+                        || engine_req.model.as_deref().is_some_and(|w| {
+                            !w.is_empty() && {
+                                let cached = crate::models_pool::load(&self.cfg.state_dir, &a.id);
+                                !cached.is_empty() && !cached.iter().any(|m| m.id == w)
+                            }
+                        });
+                    if may_pause_for_pick {
+                        drop(global_permit.take());
+                    }
+                    let decision = self
                         .resolve_model_for_account(req.uid, req.chat_id, a, engine_req.model.as_deref(), &stop, force)
-                        .await
+                        .await;
+                    if global_permit.is_none() && !matches!(decision, ModelDecision::Cancelled(_)) {
+                        let mut re_cancel = cancel_rx.clone();
+                        match self
+                            .acquire_global_slot_for(
+                                req.uid,
+                                req.chat_id,
+                                &req.user_label,
+                                backend,
+                                &active_entry,
+                                &mut re_cancel,
+                            )
+                            .await
+                        {
+                            Some(p) => {
+                                p.set_target(Some(a.id.clone()), backend);
+                                global_permit = Some(p);
+                            }
+                            None => {
+                                if let Some(mid) = status_msg_id {
+                                    let _ = self.client.delete_message(req.chat_id, mid).await;
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                    match decision
                     {
                         ModelDecision::Keep => {
                             // always pass an explicit --model: the shared settings.json default
@@ -2775,6 +3056,7 @@ impl JobManager {
                     p.record_failure(&a.id, &cls, &msg);
                     if same_retries < 1 && attempt < max_attempts {
                         same_retries += 1;
+                        pinned_account = Some(a.id.clone());
                         prev_steps = prev_steps.max(res.steps);
                         if res.steps > 0 {
                             if let Some(c) = res.conversation_id.clone().filter(|c| p.conversation_exists(c)) {
@@ -3011,8 +3293,8 @@ impl JobManager {
     }
 
     pub(crate) async fn alert_owner_breaker(&self, brk: &(i64, String)) {
-        let owner = self.cfg.owner_id;
-        if owner == 0 {
+        let owners = self.acl.owner_ids();
+        if owners.is_empty() {
             return;
         }
         let html = self.pool_breaker_note(brk);
@@ -3024,12 +3306,16 @@ impl JobManager {
                 .premium()
                 .callback_button(None, "🌐 Open /proxies", "px:list"),
         ]]);
-        let _ = self.render.send_html_simple(owner, &html, Some(mk)).await;
+        for owner in owners {
+            if owner != 0 {
+                let _ = self.render.send_html_simple(owner, &html, Some(mk.clone())).await;
+            }
+        }
     }
 
     pub(crate) async fn alert_owner_weekly_reserved(&self, a: &Account, p: &AccountStore) {
-        let owner = self.cfg.owner_id;
-        if owner == 0 {
+        let owners = self.acl.owner_ids();
+        if owners.is_empty() {
             return;
         }
         let pol = p.policy();
@@ -3052,12 +3338,16 @@ impl JobManager {
             .render
             .premium()
             .callback_button(None, "Accounts", format!("acct:v:{}", fresh.id))]]);
-        let _ = self.render.send_html_simple(owner, &html, Some(mk)).await;
+        for owner in owners {
+            if owner != 0 {
+                let _ = self.render.send_html_simple(owner, &html, Some(mk.clone())).await;
+            }
+        }
     }
 
     async fn alert_owner_disabled(&self, a: &Account, class: FailureClass, msg: &str) {
-        let owner = self.cfg.owner_id;
-        if owner == 0 {
+        let owners = self.acl.owner_ids();
+        if owners.is_empty() {
             return;
         }
         let detail: String = msg.chars().take(400).collect();
@@ -3072,7 +3362,11 @@ impl JobManager {
             .render
             .premium()
             .callback_button(None, "Accounts", "acct:list")]]);
-        let _ = self.render.send_html_simple(owner, &html, Some(mk)).await;
+        for owner in owners {
+            if owner != 0 {
+                let _ = self.render.send_html_simple(owner, &html, Some(mk.clone())).await;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

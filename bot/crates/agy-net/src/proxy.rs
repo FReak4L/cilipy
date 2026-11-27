@@ -895,10 +895,7 @@ pub fn parse_retry_after_secs(raw: &str) -> Option<u64> {
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    s.chars().take(max_chars).collect()
+    agy_core::text::truncate_chars(s, max_chars)
 }
 
 #[cfg(test)]

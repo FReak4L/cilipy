@@ -39,10 +39,7 @@ pub const GROK_BOT_SVC: &str = "GrokBotService";
 pub const DASHBOARD_SVC: &str = "DashboardService";
 
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    agy_core::text::now_unix()
 }
 
 fn now_ms() -> u64 {

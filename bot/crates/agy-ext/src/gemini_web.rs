@@ -84,6 +84,9 @@ Direct, accurate, well-structured, concise. Never fabricate file contents, comma
 static ACCOUNT_SEMAPHORES: LazyLock<Mutex<HashMap<String, Arc<Semaphore>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Serializes read-modify-write access to `gems.json`.
+static GEM_FILE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 fn account_semaphore(account_id: &str) -> Arc<Semaphore> {
     let mut map = ACCOUNT_SEMAPHORES
         .lock()
@@ -91,6 +94,22 @@ fn account_semaphore(account_id: &str) -> Arc<Semaphore> {
     map.entry(account_id.to_string())
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
         .clone()
+}
+
+/// Remove a deleted account's semaphore entry so `ACCOUNT_SEMAPHORES` never leaks unboundedly.
+pub fn remove_account_semaphore(account_id: &str) {
+    let mut map = ACCOUNT_SEMAPHORES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.remove(account_id);
+}
+
+fn account_is_idle(account_id: &str) -> bool {
+    let map = ACCOUNT_SEMAPHORES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(account_id)
+        .is_none_or(|sem| sem.available_permits() > 0)
 }
 
 fn now_epoch() -> u64 {
@@ -559,7 +578,11 @@ impl GeminiAccountPool {
         if self.active_account_id.as_deref() == Some(id) {
             self.active_account_id = self.accounts.first().map(|a| a.id.clone());
         }
-        self.accounts.len() != before
+        let removed = self.accounts.len() != before;
+        if removed {
+            remove_account_semaphore(id);
+        }
+        removed
     }
 
     pub fn toggle(&mut self, id: &str) -> Option<bool> {
@@ -636,9 +659,28 @@ impl GeminiAccountPool {
             .collect()
     }
 
-    /// Pick the best healthy account using optional owner pin (if healthy) or EWMA/anti-burst scoring.
+    /// Pick the best healthy account using optional pin (if healthy & idle) or idle-first EWMA/anti-burst scoring.
     pub fn pick_next(
         &self,
+        prefer_web_sidecar: bool,
+        require_image_capable: bool,
+        exclude: &HashSet<String>,
+        now: u64,
+    ) -> Option<GeminiAccount> {
+        self.pick_next_with_pin(
+            self.active_account_id.as_deref(),
+            prefer_web_sidecar,
+            require_image_capable,
+            exclude,
+            now,
+        )
+    }
+
+    /// Pick the best healthy account with an explicit per-user pin, preferring idle accounts
+    /// (`available_permits() > 0`) so concurrent owners automatically spread across distinct slots.
+    pub fn pick_next_with_pin(
+        &self,
+        pinned: Option<&str>,
         prefer_web_sidecar: bool,
         require_image_capable: bool,
         exclude: &HashSet<String>,
@@ -665,8 +707,22 @@ impl GeminiAccountPool {
             }
         }
 
-        if let Some(pin) = self.active_account_id.as_deref() {
-            if let Some(found) = eligible
+        // Prefer accounts that are currently idle (no active semaphore holder) to avoid piling
+        // two concurrent owners onto the same account when another healthy slot is free.
+        let idle_only: Vec<&GeminiAccount> = eligible
+            .iter()
+            .copied()
+            .filter(|a| account_is_idle(&a.id))
+            .collect();
+        let pool_view = if idle_only.is_empty() {
+            &mut eligible
+        } else {
+            eligible = idle_only;
+            &mut eligible
+        };
+
+        if let Some(pin) = pinned {
+            if let Some(found) = pool_view
                 .iter()
                 .find(|a| a.id == pin && a.decayed_error_rate(now) <= 0.6)
             {
@@ -674,13 +730,13 @@ impl GeminiAccountPool {
             }
         }
 
-        eligible.sort_by(|a, b| {
+        pool_view.sort_by(|a, b| {
             let sa = a.dispatch_score(prefer_web_sidecar, now);
             let sb = b.dispatch_score(prefer_web_sidecar, now);
             sa.total_cmp(&sb)
                 .then_with(|| a.last_used_epoch.cmp(&b.last_used_epoch))
         });
-        eligible.first().map(|a| (*a).clone())
+        pool_view.first().map(|a| (*a).clone())
     }
 
     pub fn record_success(&mut self, id: &str, now: u64, latency_ms: u64) {
@@ -1070,7 +1126,7 @@ pub struct GeminiGemStore {
 }
 
 impl GeminiGemStore {
-    pub fn load(state_dir: &Path) -> Self {
+    fn load_unlocked(state_dir: &Path) -> Self {
         let p = gemini_gems_path(state_dir);
         fs::read_to_string(&p)
             .ok()
@@ -1078,9 +1134,25 @@ impl GeminiGemStore {
             .unwrap_or_default()
     }
 
+    pub fn load(state_dir: &Path) -> Self {
+        let _guard = GEM_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self::load_unlocked(state_dir)
+    }
+
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
+        let _guard = GEM_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = gemini_gems_path(state_dir);
         atomic_write_json(&p, self, true).map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    /// Thread-safe atomic load -> mutate -> save serialized under `GEM_FILE_LOCK`.
+    pub fn mutate_locked<T, F: FnOnce(&mut Self) -> T>(state_dir: &Path, f: F) -> std::io::Result<T> {
+        let _guard = GEM_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = Self::load_unlocked(state_dir);
+        let out = f(&mut store);
+        let p = gemini_gems_path(state_dir);
+        atomic_write_json(&p, &store, true).map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(out)
     }
 
     pub fn get(&self, id: &str) -> Option<&GeminiGem> {
@@ -1524,6 +1596,10 @@ pub struct GeminiTurnParams<'a> {
     pub model_override: Option<&'a str>,
     pub mode: GeminiChatMode,
     pub gem_id: Option<&'a str>,
+    pub pinned_account_id: Option<&'a str>,
+    #[allow(clippy::type_complexity)]
+    pub live_proxy_resolver:
+        Option<&'a (dyn Fn(Option<&str>) -> std::result::Result<Option<String>, String> + Send + Sync)>,
     pub cwd: &'a Path,
     pub workspace_root: &'a Path,
     pub outbox_dir: &'a Path,
@@ -1543,7 +1619,7 @@ pub struct GeminiTurnParams<'a> {
 pub async fn run_gemini_web_turn(
     params: GeminiTurnParams<'_>,
     on_progress: Option<ProgressCallback>,
-    cancel: watch::Receiver<bool>,
+    mut cancel: watch::Receiver<bool>,
 ) -> CoreResult<JobResult> {
     let gem_store = GeminiGemStore::load(params.state_dir);
     let active_gem = params.gem_id.and_then(|gid| gem_store.get(gid)).cloned();
@@ -1571,7 +1647,8 @@ pub async fn run_gemini_web_turn(
 
         let now = now_epoch();
         let pool = load_pool_locked(params.state_dir);
-        let Some(account) = pool.pick_next(prefer_web, require_image, &tried, now) else {
+        let pin = params.pinned_account_id.or(pool.active_account_id.as_deref());
+        let Some(mut account) = pool.pick_next_with_pin(pin, prefer_web, require_image, &tried, now) else {
             let msg = if pool.accounts.is_empty() {
                 "No Gemini Manager accounts configured yet. Open Web Model → Gemini Manager → Accounts to add a Free AI Studio Key or Web2API sidecar.".to_string()
             } else if require_image
@@ -1591,11 +1668,34 @@ pub async fn run_gemini_web_turn(
         };
         tried.insert(account.id.clone());
 
-        // Enforce strict PER_ACCOUNT_CONCURRENCY=1 to avoid Google risk triggers.
+        // Resolve live fail-closed sticky proxy status from ProxyRegistry (never trust stale snapshots).
+        if let (Some(resolver), Some(pid)) = (params.live_proxy_resolver, account.proxy_id.as_deref()) {
+            match resolver(Some(pid)) {
+                Ok(live_url) => account.proxy_url = live_url,
+                Err(reason) => {
+                    last_err = format!("Proxy blocked (fail-closed) for {}: {reason}", account.label);
+                    continue;
+                }
+            }
+        }
+
+        // Enforce strict PER_ACCOUNT_CONCURRENCY=1 with immediate /stop cancellation while waiting.
         let sem = account_semaphore(&account.id);
-        let _permit = match sem.acquire().await {
-            Ok(p) => p,
-            Err(_) => continue,
+        let _permit = tokio::select! {
+            res = sem.acquire() => match res {
+                Ok(p) => p,
+                Err(_) => continue,
+            },
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    return Ok(JobResult {
+                        stopped: true,
+                        finished_reason: Some("stopped".to_string()),
+                        ..JobResult::default()
+                    });
+                }
+                continue;
+            }
         };
         let t_start = std::time::Instant::now();
 
@@ -2044,6 +2144,8 @@ mod tests {
                 model_override: None,
                 mode: GeminiChatMode::Agent,
                 gem_id: None,
+                pinned_account_id: None,
+                live_proxy_resolver: None,
                 cwd: &ws,
                 workspace_root: &ws,
                 outbox_dir: &outbox,
@@ -2142,5 +2244,117 @@ mod tests {
                 .unwrap();
         assert!(path2.exists());
         assert_eq!(revised2, "url cat");
+    }
+
+    #[tokio::test]
+    async fn multi_owner_idle_spread_cancel_semaphore_and_fail_closed_proxy() {
+        let dir = TempDir::new().unwrap();
+        let state = dir.path().join("state");
+        let ws = dir.path().join("ws");
+        let outbox = dir.path().join("outbox");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(&outbox).unwrap();
+
+        let mut pool = GeminiAccountPool::default();
+        let mut a1 = make_acc("mo-a1", "Acc1", GeminiBackendKind::Web2ApiSidecar, "http://127.0.0.1:9/v1", 10);
+        a1.proxy_id = Some("px-dead".to_string());
+        let a2 = make_acc("mo-a2", "Acc2", GeminiBackendKind::Web2ApiSidecar, "http://127.0.0.1:9/v1", 10);
+        pool.upsert(a1);
+        pool.upsert(a2);
+        pool.save(&state).unwrap();
+
+        // 1) When mo-a1 semaphore is held by Owner 1, Owner 2 picks idle mo-a2 automatically
+        let sem1 = account_semaphore("mo-a1");
+        let _held1 = sem1.acquire().await.unwrap();
+        let picked = pool
+            .pick_next_with_pin(Some("mo-a1"), true, false, &HashSet::new(), 100)
+            .expect("should pick idle peer");
+        assert_eq!(picked.id, "mo-a2", "idle account must beat busy pinned account");
+
+        // 2) When all accounts are held, /stop cancels run_gemini_web_turn immediately while waiting on semaphore
+        let sem2 = account_semaphore("mo-a2");
+        let _held2 = sem2.acquire().await.unwrap();
+        let (tx, rx) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = tx.send(true);
+        });
+        let res = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_gemini_web_turn(
+                GeminiTurnParams {
+                    prompt: "cancel while waiting",
+                    model_override: None,
+                    mode: GeminiChatMode::Chat,
+                    gem_id: None,
+                    pinned_account_id: Some("mo-a2"),
+                    live_proxy_resolver: None,
+                    cwd: &ws,
+                    workspace_root: &ws,
+                    outbox_dir: &outbox,
+                    mcp_config_path: &dir.path().join("mcp.json"),
+                    skills_dir: &dir.path().join("skills"),
+                    state_dir: &state,
+                    session_key: None,
+                    allow_root: false,
+                    allow_sandbox: false,
+                    max_steps: Some(1),
+                    three_stage_mode: ThreeStageMode::Off,
+                },
+                None,
+                rx,
+            ),
+        )
+        .await
+        .expect("must cancel promptly instead of hanging on semaphore")
+        .unwrap();
+        assert!(res.stopped, "cancelled turn must return stopped=true");
+        drop(_held1);
+        drop(_held2);
+
+        // 3) Live fail-closed proxy resolver blocks mo-a1 even if stale proxy_url existed
+        let mut pool_only_a1 = GeminiAccountPool::default();
+        let mut a1_blk = make_acc("mo-blk", "BlkAcc", GeminiBackendKind::Web2ApiSidecar, "http://127.0.0.1:9/v1", 10);
+        a1_blk.proxy_id = Some("px-dead".to_string());
+        a1_blk.proxy_url = Some("http://stale-proxy:8080".to_string());
+        pool_only_a1.upsert(a1_blk);
+        pool_only_a1.save(&state).unwrap();
+
+        let (_tx2, rx2) = watch::channel(false);
+        let blk_resolver = |_pid: Option<&str>| -> std::result::Result<Option<String>, String> {
+            Err("proxy disabled".to_string())
+        };
+        let err = run_gemini_web_turn(
+            GeminiTurnParams {
+                prompt: "blocked proxy test",
+                model_override: None,
+                mode: GeminiChatMode::Chat,
+                gem_id: None,
+                pinned_account_id: None,
+                live_proxy_resolver: Some(&blk_resolver),
+                cwd: &ws,
+                workspace_root: &ws,
+                outbox_dir: &outbox,
+                mcp_config_path: &dir.path().join("mcp.json"),
+                skills_dir: &dir.path().join("skills"),
+                state_dir: &state,
+                session_key: None,
+                allow_root: false,
+                allow_sandbox: false,
+                max_steps: Some(1),
+                three_stage_mode: ThreeStageMode::Off,
+            },
+            None,
+            rx2,
+        )
+        .await
+        .expect_err("must fail closed when live proxy is blocked");
+        assert!(err.to_string().contains("fail-closed"), "got: {err}");
+
+        // 4) Removing an account cleans up ACCOUNT_SEMAPHORES
+        let mut p_rm = GeminiAccountPool::load_locked(&state);
+        assert!(p_rm.remove("mo-blk"));
+        assert!(!ACCOUNT_SEMAPHORES.lock().unwrap().contains_key("mo-blk"));
     }
 }

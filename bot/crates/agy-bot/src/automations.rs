@@ -320,6 +320,7 @@ async fn fire(ctx: &Arc<BotCtx>, a: &Automation, manual: bool) {
     req.overrides.force_engine = Some("agy".to_string());
     match ctx.jobs.enqueue(req).await {
         Ok(EnqueueOutcome::QueueFull) => set_status(&st, &a.id, "skipped: queue full"),
+        Ok(EnqueueOutcome::RateLimited) => set_status(&st, &a.id, "skipped: burst limited"),
         Ok(EnqueueOutcome::Queued(n)) => {
             if manual {
                 let now = Utc::now().timestamp();
@@ -350,11 +351,7 @@ async fn fire(ctx: &Arc<BotCtx>, a: &Automation, manual: bool) {
 }
 
 fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        s.chars().take(n).collect::<String>() + "…"
-    }
+    agy_core::text::clip_ellipsis(s, n)
 }
 
 /// Background loop: checks due automations every 20 s.

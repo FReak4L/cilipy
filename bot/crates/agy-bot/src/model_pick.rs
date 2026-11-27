@@ -82,8 +82,13 @@ impl JobManager {
                 return ModelDecision::Use(c);
             }
         }
-        // one question at a time per manager (parallel mothers may ask concurrently)
-        let _guard = self.model_pick_lock.lock().await;
+        // One model-pick question at a time per user (so concurrent owners never block each other).
+        let user_lock = self
+            .model_pick_locks
+            .entry(uid)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = user_lock.lock().await;
         if let Some(c) = self.model_choice.get(&key).map(|v| v.clone()) {
             if list.iter().any(|m| m.id == c) && !(rejected && c == wanted) {
                 return ModelDecision::Use(c);

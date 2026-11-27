@@ -22,10 +22,7 @@ const MAX_HEALTH_AGE_SECS: f64 = 120.0;
 const SELF_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    agy_core::text::now_secs()
 }
 
 /// CLI operational mode parsed from process arguments.

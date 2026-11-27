@@ -874,21 +874,73 @@ impl JobManager {
                 notes.push(self.pool_breaker_note(&brk));
                 break;
             }
-            let picked = pinned
-                .take()
-                .and_then(|id| pool.pick_pinned_begin_with_filter(&id, &tried, |a| self.account_proxy_allowed(a)))
-                .or_else(|| match avoid.as_ref() {
-                    // parallel workers: prefer an account no other worker of this run holds
-                    Some(f) => pool.acquire_distinct_with_filter(pick_uid, &tried, &f(), |a| {
-                        self.account_proxy_allowed(a)
-                    }),
-                    None => pool.pick_begin_with_filter(pick_uid, &tried, |a| {
-                        self.account_proxy_allowed(a)
-                    }),
-                });
-            let _inflight = picked.as_ref().map(|a| super::InFlightGuard(Arc::clone(&pool), a.id.clone()));
+            let try_pick = || {
+                pinned
+                    .as_deref()
+                    .and_then(|id| {
+                        pool.pick_pinned_begin_with_filter(id, &tried, |a| {
+                            self.account_proxy_allowed(a)
+                        })
+                    })
+                    .or_else(|| match avoid.as_ref() {
+                        // parallel workers: prefer an account no other worker of this run holds
+                        Some(f) => pool.acquire_distinct_with_filter(pick_uid, &tried, &f(), |a| {
+                            self.account_proxy_allowed(a)
+                        }),
+                        None => pool.pick_begin_with_filter(pick_uid, &tried, |a| {
+                            self.account_proxy_allowed(a)
+                        }),
+                    })
+            };
+            let mut picked = try_pick();
+            if picked.is_none() && pool.breaker_status().is_none() {
+                let deadline = Instant::now() + Duration::from_secs(45);
+                while picked.is_none() && Instant::now() < deadline && !stop_flag() {
+                    let now_i = super::now_secs() as i64;
+                    let pol = pool.policy();
+                    let any_busy_eligible = pool.list().iter().any(|a| {
+                        !tried.contains(&a.id)
+                            && a.available_at_with_policy(now_i, &pol)
+                            && self.account_proxy_allowed(a)
+                            && pool.in_flight(&a.id) > 0
+                    });
+                    if !any_busy_eligible {
+                        break;
+                    }
+                    let notified = self.account_freed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if pool.breaker_status().is_some() {
+                        break;
+                    }
+                    picked = try_pick();
+                    if picked.is_some() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = &mut notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    }
+                    if pool.breaker_status().is_some() {
+                        break;
+                    }
+                    picked = try_pick();
+                }
+            }
+            if picked.is_some() {
+                pinned.take();
+            }
+            let _inflight = picked.as_ref().map(|a| {
+                super::InFlightGuard(
+                    Arc::clone(&pool),
+                    a.id.clone(),
+                    Arc::clone(&self.account_freed),
+                )
+            });
             let Some(a): Option<Account> = picked else {
-                notes.push(self.pool_exhausted_note(&pool));
+                if !stop_flag() {
+                    notes.push(self.pool_exhausted_note(&pool));
+                }
                 break;
             };
             // Publish chosen account immediately so sibling workers' `avoid` sees it before async model check.

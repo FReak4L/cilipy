@@ -18,6 +18,7 @@ pub mod memory;
 pub mod openhands;
 pub mod openhands_mcp;
 pub mod pty_manager;
+pub mod quota_probe;
 pub mod skill_hub;
 pub mod skill_index;
 pub mod skills;

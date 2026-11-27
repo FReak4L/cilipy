@@ -663,73 +663,90 @@ async fn dispatch_tool_call(
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
             let sys = targs.get("system_prompt").and_then(Value::as_str);
-            let (_tx, rx) = watch::channel(false);
+            let timeout_secs = targs
+                .get("timeout_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(145)
+                .clamp(15, 165);
+            let (cancel_tx, rx) = watch::channel(false);
 
-            let res = match engine.as_str() {
-                "grok" => {
-                    let proxy_url = match resolve_grok_sticky_proxy(&ctx.state_dir) {
-                        Ok(px) => px,
-                        Err(e) => return err_text(id, e),
-                    };
-                    let model = targs
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or(DEFAULT_GROK_MODEL);
-                    info!(engine = "grok", model = %model, "mcp-openhands delegating task");
-                    run_grok_agent_with_options(
-                        &ctx.state_dir,
-                        model,
-                        &task,
-                        &cwd,
-                        &ctx.workspace,
-                        &ctx.mcp_config,
-                        &ctx.skills_dir,
-                        session_key,
-                        true,
-                        true,
-                        true,
-                        max_steps,
-                        sys,
-                        proxy_url,
-                        None,
-                        rx,
-                    )
-                    .await
+            let fut = async {
+                match engine.as_str() {
+                    "grok" => {
+                        let proxy_url = match resolve_grok_sticky_proxy(&ctx.state_dir) {
+                            Ok(px) => px,
+                            Err(e) => return Err(agy_core::BridgeError::Network(e)),
+                        };
+                        let model = targs
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(DEFAULT_GROK_MODEL);
+                        info!(engine = "grok", model = %model, timeout_secs, "mcp-openhands delegating task");
+                        run_grok_agent_with_options(
+                            &ctx.state_dir,
+                            model,
+                            &task,
+                            &cwd,
+                            &ctx.workspace,
+                            &ctx.mcp_config,
+                            &ctx.skills_dir,
+                            session_key,
+                            true,
+                            true,
+                            true,
+                            max_steps,
+                            sys,
+                            proxy_url,
+                            None,
+                            rx,
+                        )
+                        .await
+                    }
+                    "uncensored" | "venice" => {
+                        let (api_base, api_key) = resolve_venice_credentials(&ctx.mcp_config);
+                        let model = targs
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(DEFAULT_UNCENSORED_MODEL);
+                        info!(engine = "uncensored", model = %model, timeout_secs, "mcp-openhands delegating task");
+                        run_uncensored_agent(
+                            &api_base,
+                            &api_key,
+                            model,
+                            &task,
+                            &cwd,
+                            &ctx.workspace,
+                            &ctx.mcp_config,
+                            &ctx.skills_dir,
+                            &ctx.state_dir,
+                            session_key,
+                            true,
+                            true,
+                            true,
+                            max_steps,
+                            sys,
+                            None,
+                            rx,
+                        )
+                        .await
+                    }
+                    other => Err(agy_core::BridgeError::Validation(format!(
+                        "Error: unsupported engine '{other}' (use 'uncensored' or 'grok')."
+                    ))),
                 }
-                "uncensored" | "venice" => {
-                    let (api_base, api_key) = resolve_venice_credentials(&ctx.mcp_config);
-                    let model = targs
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or(DEFAULT_UNCENSORED_MODEL);
-                    info!(engine = "uncensored", model = %model, "mcp-openhands delegating task");
-                    run_uncensored_agent(
-                        &api_base,
-                        &api_key,
-                        model,
-                        &task,
-                        &cwd,
-                        &ctx.workspace,
-                        &ctx.mcp_config,
-                        &ctx.skills_dir,
-                        &ctx.state_dir,
-                        session_key,
-                        true,
-                        true,
-                        true,
-                        max_steps,
-                        sys,
-                        None,
-                        rx,
-                    )
-                    .await
-                }
-                other => {
+            };
+
+            let res = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    let _ = cancel_tx.send(true);
                     return err_text(
                         id,
-                        format!("Error: unsupported engine '{other}' (use 'uncensored' or 'grok')."),
+                        format!(
+                            "Error: oh_delegate_agent({engine}) timed out after {timeout_secs}s (capped below MCP client deadline). Try smaller max_steps or focused scope."
+                        ),
                     );
                 }
             };
